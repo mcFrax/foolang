@@ -1,15 +1,28 @@
 
-type List:
+type List[T]:
     Nil
     Cons:
-        Int head
+        T head
         List tail
 
+fun len[T](List[T] l):
+    case l:
+        Nil:
+            return 0
+        Cons(_, l'):
+            return 0 + len(l')
 
-def inc(-> Int i):
-    i <- i+1
+fun inc(-> Int i):
+    -> i + 1
 
-def testInc():
+fun zip[T1, T2](List[T1] l1, List[T2] l1) -> List[(T1, T2)]:
+    case l1, l2:
+        Cons(e1, l1'), Cons(e2, l2'):
+            return Cons((e1, e2), zip(l1', l2'))
+        _, _:
+            return []
+
+fun testInc():
     let a = 0;
     let b = 0;
     # inc(a);  # error: result ignored
@@ -20,25 +33,14 @@ def testInc():
     b <- inc(a)  # put result in b
     assert a = 1 and b = 2  # b := a+1
 
-def factorial(Int n):
+fun factorial(Int n):
     if n < 2:
         return 1
     else:
         return n * factorial(n-1)
 
-def factorial1(Int n):
+fun factorial1(Int n):
     let result = 1
     for i in 2..n:
-        result <- * i
+        -> result * i
     return result
-
-hof mapArray((a)->b f)([a] l) -> [b]:
-    [b] result = []
-    array_reserve(result, l.length)
-    for elem in l:
-        array_push(-> result, f(elem))
-    return result
-
-hof mapArrayInSitu((a)->a f)(-> [a] list):
-    for -> elem in list:
-        f(-> elem)

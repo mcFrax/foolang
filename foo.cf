@@ -4,50 +4,55 @@ layout toplevel ;
 layout ":" ;
 comment "#";
 
-Ident
+position token Name ((letter | '_') (letter | digit | '_')* ('\'')*) ;
 
 Prog. Program ::= [TopDef] ;
 separator TopDef ";" ;
 
-VariantTypeDef. TopDef ::= "type" Ident ":" "{" [VariantDef] "}" ;
-SimpleTypeDef.  TopDef ::= "type" Ident ":" "{" [Field] "}" ;  -- just one variant
-FunDef.         TopDef ::= "def" Ident "(" [ArgDef] ")" RetType Block ;
-HofDef.         TopDef ::= "hof" Ident "(" [HofArgDef] ")""(" [ArgDef] ")" RetType Block ;
+VariantTypeDef. TopDef ::= "type" Name GenArgsDef ":" "{" [VariantDef] "}" ;
+SimpleTypeDef.  TopDef ::= "type" Name GenArgsDef ":" "{" [Field] "}" ;  -- just one variant
+ProcDef.        TopDef ::= "proc" Name GenArgsDef "(" [ArgDef] ")" RetType Block ;
+FunDef.         TopDef ::= "fun" Name GenArgsDef "(" [ArgDef] ")" RetType Block ;
 separator ArgDef "," ;
-separator HofArgDef "," ;
 
-EmptyVariant.  VariantDef ::= Ident ;
-SimpleVariant. VariantDef ::= Ident "(" [Type] ")" ;
-RecordVariant. VariantDef ::= Ident ":" "{" [Field] "}" ;
+NoGenArgs. GenArgsDef ::= ;
+GenArgs_.  GenArgsDef ::= "[" [CommaName] "]" ;
+
+CommaName_. CommaName ::= Name ;
+separator nonempty CommaName "," ;
+
+EmptyVariant.  VariantDef ::= Name ;
+SimpleVariant. VariantDef ::= Name "(" [Type] ")" ;
+RecordVariant. VariantDef ::= Name ":" "{" [Field] "}" ;
 separator nonempty VariantDef ";" ;
 
-FieldDef. Field ::= Type Ident ;
+FieldDef. Field ::= Type Name ;
 separator nonempty Field ";" ;
 
-ValArgDef.  ArgDef ::= Type Ident ;
-VarArgDef.  ArgDef ::= "->" Type Ident ;
-
-HofArgDef_.  HofArgDef ::= "(" [Type] ")" RetType Ident ;
+ValArgDef.  ArgDef ::= Type Name ;
+VarArgDef.  ArgDef ::= "->" Type Name ;
 
 Blk. Block ::= ":" "{" [Stmt] "}" ;
 separator Stmt ";" ;
 
-separator nonempty Ident "." ;
+separator nonempty Name "." ;
 
 JustType. RetType ::= "->" Type ;
 NoType.   RetType ::= ;
 
-NamedType. Type ::= [Ident] ;
+NamedType. Type ::= [Name] ;
 ArrayType. Type ::= "[" Type "]" ;
 TupleType. Type ::= "(" [Type] ")" ;
+InstType.  Type ::= [Name] "[" [Type] "]" ; -- generic type instantiation
 separator Type "," ;
 
-StmtLet.          Stmt ::= "let" Ident "=" Exp ;
-StmtTypedLet.     Stmt ::= "let" Type Ident "=" Exp ;
-StmtAssign.       Stmt ::= Var1 "<-" Exp ;
+StmtLet.          Stmt ::= "let" Name "=" Exp ;
+StmtTypedLet.     Stmt ::= "let" Type Name "=" Exp ;
+StmtAssign.       Stmt ::= Exp "<-" Exp ;
 StmtPass.         Stmt ::= "pass" ;
 StmtAssert.       Stmt ::= "assert" Exp ;
-StmtPrint.        Stmt ::= "print" Exp ;
+StmtStatAssert.   Stmt ::= "static" "assert" Exp ;
+StmtPrint.        Stmt ::= "!" Exp ;
 StmtExp.          Stmt ::= Exp ;
 Stmt_Return.      Stmt ::= "return" ;
 Stmt_ReturnValue. Stmt ::= "return" Exp ;
@@ -55,22 +60,18 @@ Stmt_If.          Stmt ::= "if" Exp Block ;
 Stmt_Elif.        Stmt ::= "elif" Exp Block ;
 Stmt_Else.        Stmt ::= "else" Block ;
 Stmt_While.       Stmt ::= "while" Exp  Block ;
-Stmt_ForIn.       Stmt ::= "for" Ident "in" Exp Block ;
-Stmt_Case.        Stmt ::= "case" Exp ":" "{" [CasePattern] "}";
+Stmt_ForIn.       Stmt ::= "for" Name "in" Exp Block ;
+Stmt_ForVarIn.    Stmt ::= "for" "->" Name "in" Exp Block ;
+Stmt_Case.        Stmt ::= "case" [Exp] ":" "{" [CasePattern] "}";
 separator CasePattern ";" ;
 
-Pattern. CasePattern ::= Exp Block ;
-
-VarRes.   Var ::= "->" Var1 ;
-_.   Var ::= Var1 ;
-VarNamed. Var1 ::= [Ident] ;
-VarCell.  Var1 ::= Var1 "[" Exp "]" ;
+Pattern. CasePattern ::= [Exp] Block ;
 
 ExpOr. Exp2 ::= Exp2 "or" Exp4 ;
 
 ExpAnd. Exp4 ::= Exp4 "and" Exp6 ;
 
-ExpCmp. Exp6 ::= Exp8 CmpOp Exp8 ;
+ExpCmp. Exp6 ::= Exp6 CmpOp Exp8 ;
 
 EqOp. CmpOp ::= "=" ;
 NeOp. CmpOp ::= "/=" ;
@@ -87,15 +88,21 @@ ExpDiv.    Exp42 ::= Exp42 "/" Exp50 ;
 ExpDivInt. Exp42 ::= Exp42 "//" Exp50 ;
 ExpMod.    Exp42 ::= Exp42 "%" Exp50 ;
 
-ExpCall. Exp50 ::= Exp60 "(" [Exp] ")" ;
+ExpRange. Exp50 ::= Exp55 ".." Exp55 ;
 
-ExpVar.   Exp60 ::= Var ;
+ExpCall. Exp55 ::= Exp60 "(" [Exp] ")" ;
+
 ExpInt.   Exp60 ::= Integer ;
+ExpStr.   Exp60 ::= String ;
 ExpArray. Exp60 ::= "[" [Exp] "]" ;
-ExpNot.   Exp60 ::= "not" Exp60 ;
-ExpNeg.   Exp60 ::= "-" Exp60 ;
 ExpTuple. Exp60 ::= "(" Exp "," [Exp] ")" ;
 
+ExpNot.   Exp60 ::= "not" Exp60 ;
+ExpNeg.   Exp60 ::= "-" Exp60 ;
+
+ExpVR.        Exp70 ::= "->" Exp71 ;
+ExpVoT.       Exp71 ::= [Name] ; -- var or type
+ExpSubscript. Exp71 ::= Exp71 "[" [Exp] "]" ;  -- index projection or generic instantiation
 
 separator Exp ",";
-coercions Exp 70 ;
+coercions Exp 100 ;
