@@ -46,8 +46,8 @@ TupleType. Type ::= "(" [Type] ")" ;
 InstType.  Type ::= [Name] "[" [Type] "]" ; -- generic type instantiation
 separator Type "," ;
 
-StmtLet.          Stmt ::= "let" Name "=" Exp ;
-StmtTypedLet.     Stmt ::= "let" Type Name "=" Exp ;
+StmtLet.          Stmt ::= "let" Exp60 "=" Exp ;
+StmtTypedLet.     Stmt ::= "let" Exp71 Name "=" Exp ;
 StmtAssign.       Stmt ::= Exp "<-" Exp ;
 StmtPass.         Stmt ::= "pass" ;
 StmtAssert.       Stmt ::= "assert" Exp ;
@@ -73,7 +73,7 @@ ExpAnd. Exp4 ::= Exp4 "and" Exp6 ;
 
 ExpCmp. Exp6 ::= Exp6 CmpOp Exp8 ;
 
-EqOp. CmpOp ::= "=" ;
+EqOp. CmpOp ::= "==" ;
 NeOp. CmpOp ::= "/=" ;
 LtOp. CmpOp ::= "<" ;
 GtOp. CmpOp ::= ">" ;

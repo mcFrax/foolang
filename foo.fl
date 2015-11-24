@@ -27,11 +27,11 @@ fun testInc():
     let b = 0;
     # inc(a);  # error: result ignored
     _ <- inc(a);  # result explicitly ignored
-    assert a = 0 and b = 0  # nothing changed
+    assert a == 0 and b == 0  # nothing changed
     inc(-> a);  # put result in a
-    assert a = 1 and b = 0  # a incremented
+    assert a == 1 and b == 0  # a incremented
     b <- inc(a)  # put result in b
-    assert a = 1 and b = 2  # b := a+1
+    assert a == 1 and b == 2  # b :== a+1
 
 fun factorial(Int n):
     if n < 2:
