@@ -1,0 +1,101 @@
+entrypoints Program;
+
+layout toplevel ;
+layout ":" ;
+comment "#";
+
+Ident
+
+Prog. Program ::= [TopDef] ;
+separator TopDef ";" ;
+
+VariantTypeDef. TopDef ::= "type" Ident ":" "{" [VariantDef] "}" ;
+SimpleTypeDef.  TopDef ::= "type" Ident ":" "{" [Field] "}" ;  -- just one variant
+FunDef.         TopDef ::= "def" Ident "(" [ArgDef] ")" RetType Block ;
+HofDef.         TopDef ::= "hof" Ident "(" [HofArgDef] ")""(" [ArgDef] ")" RetType Block ;
+separator ArgDef "," ;
+separator HofArgDef "," ;
+
+EmptyVariant.  VariantDef ::= Ident ;
+SimpleVariant. VariantDef ::= Ident "(" [Type] ")" ;
+RecordVariant. VariantDef ::= Ident ":" "{" [Field] "}" ;
+separator nonempty VariantDef ";" ;
+
+FieldDef. Field ::= Type Ident ;
+separator nonempty Field ";" ;
+
+ValArgDef.  ArgDef ::= Type Ident ;
+VarArgDef.  ArgDef ::= "->" Type Ident ;
+
+HofArgDef_.  HofArgDef ::= "(" [Type] ")" RetType Ident ;
+
+Blk. Block ::= ":" "{" [Stmt] "}" ;
+separator Stmt ";" ;
+
+separator nonempty Ident "." ;
+
+JustType. RetType ::= "->" Type ;
+NoType.   RetType ::= ;
+
+NamedType. Type ::= [Ident] ;
+ArrayType. Type ::= "[" Type "]" ;
+TupleType. Type ::= "(" [Type] ")" ;
+separator Type "," ;
+
+StmtLet.          Stmt ::= "let" Ident "=" Exp ;
+StmtTypedLet.     Stmt ::= "let" Type Ident "=" Exp ;
+StmtAssign.       Stmt ::= Var1 "<-" Exp ;
+StmtPass.         Stmt ::= "pass" ;
+StmtAssert.       Stmt ::= "assert" Exp ;
+StmtPrint.        Stmt ::= "print" Exp ;
+StmtExp.          Stmt ::= Exp ;
+Stmt_Return.      Stmt ::= "return" ;
+Stmt_ReturnValue. Stmt ::= "return" Exp ;
+Stmt_If.          Stmt ::= "if" Exp Block ;
+Stmt_Elif.        Stmt ::= "elif" Exp Block ;
+Stmt_Else.        Stmt ::= "else" Block ;
+Stmt_While.       Stmt ::= "while" Exp  Block ;
+Stmt_ForIn.       Stmt ::= "for" Ident "in" Exp Block ;
+Stmt_Case.        Stmt ::= "case" Exp ":" "{" [CasePattern] "}";
+separator CasePattern ";" ;
+
+Pattern. CasePattern ::= Exp Block ;
+
+VarRes.   Var ::= "->" Var1 ;
+_.   Var ::= Var1 ;
+VarNamed. Var1 ::= [Ident] ;
+VarCell.  Var1 ::= Var1 "[" Exp "]" ;
+
+ExpOr. Exp2 ::= Exp2 "or" Exp4 ;
+
+ExpAnd. Exp4 ::= Exp4 "and" Exp6 ;
+
+ExpCmp. Exp6 ::= Exp8 CmpOp Exp8 ;
+
+EqOp. CmpOp ::= "=" ;
+NeOp. CmpOp ::= "/=" ;
+LtOp. CmpOp ::= "<" ;
+GtOp. CmpOp ::= ">" ;
+LeOp. CmpOp ::= "=<" ;
+GeOp. CmpOp ::= ">=" ;
+
+ExpAdd.   Exp8 ::= Exp8 "+" Exp42 ;
+ExpSub.   Exp8 ::= Exp8 "-" Exp42 ;
+
+ExpMul.    Exp42 ::= Exp42 "*" Exp50 ;
+ExpDiv.    Exp42 ::= Exp42 "/" Exp50 ;
+ExpDivInt. Exp42 ::= Exp42 "//" Exp50 ;
+ExpMod.    Exp42 ::= Exp42 "%" Exp50 ;
+
+ExpCall. Exp50 ::= Exp60 "(" [Exp] ")" ;
+
+ExpVar.   Exp60 ::= Var ;
+ExpInt.   Exp60 ::= Integer ;
+ExpArray. Exp60 ::= "[" [Exp] "]" ;
+ExpNot.   Exp60 ::= "not" Exp60 ;
+ExpNeg.   Exp60 ::= "-" Exp60 ;
+ExpTuple. Exp60 ::= "(" Exp "," [Exp] ")" ;
+
+
+separator Exp ",";
+coercions Exp 70 ;
