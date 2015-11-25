@@ -1,4 +1,4 @@
-entrypoints Program;
+entrypoints Module, Exp;
 
 layout toplevel ;
 layout ":" ;
@@ -6,7 +6,7 @@ comment "#";
 
 position token Name ((letter | '_') (letter | digit | '_')* ('\'')*) ;
 
-Prog. Program ::= [TopDef] ;
+Mod. Module ::= [TopDef] ;
 separator TopDef ";" ;
 
 VariantTypeDef. TopDef ::= "type" Name GenArgsDef ":" "{" [VariantDef] "}" ;
@@ -63,9 +63,13 @@ Stmt_While.       Stmt ::= "while" Exp  Block ;
 Stmt_ForIn.       Stmt ::= "for" Name "in" Exp Block ;
 Stmt_ForVarIn.    Stmt ::= "for" "->" Name "in" Exp Block ;
 Stmt_Case.        Stmt ::= "case" [Exp] ":" "{" [CasePattern] "}";
+internal Stmt_IfElse. Stmt ::= "if" Exp Block [ElifClause];
 separator CasePattern ";" ;
 
 Pattern. CasePattern ::= [Exp] Block ;
+
+Elif. ElifClause ::= "elif" Exp Block ;
+terminator ElifClause "" ;
 
 ExpOr. Exp2 ::= Exp2 "or" Exp4 ;
 
