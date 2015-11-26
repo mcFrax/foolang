@@ -52,11 +52,15 @@ main = do
             where
                 readLines :: InputT IO String
                 readLines = do
-                    maybeLine <- getInputLine "> "
+                    ui <- haveTerminalUI
+                    readLines' $ if ui then "> " else ""
+                readLines' :: String -> InputT IO String
+                readLines' prompt = do
+                    maybeLine <- getInputLine prompt
                     case maybeLine of
                         Nothing -> return ""
                         Just ln -> do
-                            rest <- readLines
+                            rest <- readLines' prompt
                             return $ ln ++ "\n" ++ rest
 #else
         readStdin = getContents
