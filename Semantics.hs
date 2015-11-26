@@ -342,7 +342,7 @@ runNonPureBinOp op wholeExpr lexp rexp env = do
             (AST.ExpArrow _, AST.ExpArrow _) -> error $ "Multiple arrows in " ++ (printTree wholeExpr)
             (AST.ExpArrow lexp', _) -> return (lexp', lexp', rexp)
             (_, AST.ExpArrow rexp') -> return (rexp', lexp, rexp')
-            _ -> error $ "runNonPureBinOp: non-pure expression expected, but no arrows found " ++ (printTree wholeExpr)
+            _ -> error $ "runNonPureBinOp: non-pure expression expected, but no top-level arrows found " ++ (printTree wholeExpr)
     let destLoc = expAsLoc locExp env
     val <- runPureBinOp op lexp' rexp' env
     return $ setLoc destLoc val env
