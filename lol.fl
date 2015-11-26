@@ -7,9 +7,9 @@ fun foo(-> Int a, Int b) -> Int:
     return c
 
 fun swap(-> Int a, -> Int b):
-    a' <- a
+    a1 <- a # tu trzeba wykryć, że `a` się dalej nie pojawia, więc nie ma aliasingu
     b -> a
-    b <- a'
+    b <- a1
 
 fun main():
     a <- 0

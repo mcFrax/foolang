@@ -5,8 +5,8 @@ import Control.Monad
 -- import Control.Monad.Reader.Class
 -- import Control.Monad.State.Class
 -- import qualified Data.List as L
-import Data.Bits
 import qualified Data.Map.Strict as M
+import Data.List
 import Data.Maybe
 -- import qualified Data.Set as S
 import qualified Debug.Trace
@@ -25,40 +25,90 @@ trace pref trac val = Debug.Trace.trace (pref ++ (show trac)) val
 data Err = Err String
 
 showSemError :: Err -> String
-showSemError (Err s) = "DUPA: " ++ s
+showSemError (Err s) = "ERR: " ++ s
 
-data GlobEnv = GlobEnv {
-    functions :: M.Map String Function,
+data Env = Env {
     types :: M.Map String Type,
-    variants :: M.Map String String  -- variant -> type
+    functions :: M.Map String Function,
+    variants :: M.Map String String,  -- variant -> type
+    vars :: M.Map String Value
 }
 
-type LocEnv = M.Map Loc Value
+data Loc = Loc String [AttrOrIdx] deriving (Eq, Ord, Show)
 
-newtype Loc = Loc String deriving (Eq, Ord, Show)
+varLoc :: String -> Loc
+varLoc vname = Loc vname []
+
+setLoc :: Loc -> Value -> Env -> Env
+setLoc (Loc vname fieldPath) newVal env = do
+    env{vars=M.alter f vname $ vars env}
+    where
+        f mval = do
+            Just $ setField fieldPath newVal $ case mval of
+                Nothing -> error $ "Variable " ++ vname ++ " undefined"
+                    -- it is actually an error only when fieldPath /= []
+                (Just oldVal) -> oldVal
+
+setLocs :: [(Loc, Value)] -> Env -> Env
+setLocs assocs env = foldl (\e (l, v) -> setLoc l v e) env assocs
+
+getLoc :: Loc -> Env -> Value
+getLoc (Loc vname fieldPath) env = do
+    case M.lookup vname $ vars env of
+        Just val -> getField fieldPath val
+        Nothing -> error $ "Variable " ++ vname ++ " undefined"
+
+setField :: [AttrOrIdx] -> Value -> Value -> Value
+setField [] newVal _oldVal = newVal
+setField _ _newVal _oldVal = error $ "setField not yet implemented for nonempty path"
+-- setField (Idx idx:fieldPath') newVal oldVal = oldVal
+
+getField :: [AttrOrIdx] -> Value -> Value
+getField [] val = val
+getField _ _val = error $ "getField not yet implemented for nonempty path"
+
+data AttrOrIdx = Attr String | Idx Int deriving (Eq, Ord, Show)
 
 data Function = Function {
     argNames :: [String],
+    argLocs :: [Loc],
     returns :: Bool,
     outArgs :: [String],
+    outArgLocs :: [Loc],
     body :: [AST.Stmt]
 }
 
 data Type = Type
 
-type Value = Int
+data Value = ValInt {asInt :: Int}
+           | ValString {asString :: String}
+           | ValBool {asBool :: Bool}
+           | ValChar {asChar :: Char}
+--            | ValArray {asArray :: AArray}
+--            | ValObject {asObject :: Object}
+    deriving (Eq, Show)
+
+showVal :: Value -> String
+showVal (ValInt i) = show i
+showVal (ValBool b) = show b
+showVal (ValChar c) = show c
+showVal (ValString s) = show s
+-- ...
+
+-- type AArray = M.Map Int Value
+-- type Object = M.Map String Value
 
 type BinOpF = (Value -> Value -> Value)
 
 moduleSem :: AST.Module -> String -> Either Err (IO ())
 moduleSem (AST.Mod topDefs) _fileName = do
-    let env = foldl topDefSem (GlobEnv M.empty (M.fromList [("Int", Type)]) M.empty) topDefs
+    let env = foldl topDefSem (Env (M.fromList [("Int", Type)]) M.empty M.empty M.empty) topDefs
     return $ do
-        _ <- runFunction (functions env M.! "main") env M.empty [] [] Nothing
+        _ <- runFunction (functions env M.! "main") env [] [] Nothing
         return ()
 
-topDefSem :: GlobEnv -> AST.TopDef -> GlobEnv
-topDefSem genv (AST.FunDef (AST.Name (_, name)) AST.NoGenArgs argdefs mrettype (AST.Blk fbody)) = do
+topDefSem :: Env -> AST.TopDef -> Env
+topDefSem env (AST.FunDef (AST.Name (_, name)) AST.NoGenArgs argdefs mrettype (AST.Blk fbody)) = do
     let (argnames, outargMaybes) = unzip $ map (\ad -> case ad of
                 AST.ValArgDef _type (AST.Name (_, argName)) -> (argName, Nothing)
                 AST.VarArgDef _type (AST.Name (_, argName)) -> (argName, Just argName)
@@ -66,21 +116,22 @@ topDefSem genv (AST.FunDef (AST.Name (_, name)) AST.NoGenArgs argdefs mrettype (
         freturns = case mrettype of
             AST.JustType _type -> True
             AST.NoType -> False
-    genv{functions=M.insert name (Function {
+    env{functions=M.insert name (Function {
             argNames=argnames,
+            argLocs=map varLoc argnames,
             returns=freturns,
             outArgs=catMaybes outargMaybes,
+            outArgLocs=map varLoc $ catMaybes outargMaybes,
             body=fbody
-        }) (functions genv)}
+        }) (functions env)}
 -- VariantTypeDef. TopDef ::= "type" Name GenArgsDef ":" "{" [VariantDef] "}" ;
 -- SimpleTypeDef.  TopDef ::= "type" Name GenArgsDef ":" "{" [Field] "}" ;  -- just one variant
 topDefSem _ topDef = error $ "topDefSem not yet implemented for " ++ (printTree topDef)
 
-runFunction :: Function -> GlobEnv -> LocEnv -> [Value] -> [Maybe Loc] -> Maybe Loc -> IO LocEnv
-runFunction f genv olenv args argouts mout = do
-    let ilenv = M.fromList $ (map Loc $ argNames f) `zip` args
-    (ilenv', mret) <- runStmts (body f) genv ilenv
-    let updates = case ((map Loc $ outArgs f), returns f) of
+runFunction :: Function -> Env -> [Value] -> [Maybe Loc] -> Maybe Loc -> IO Env
+runFunction f oenv args argouts mout = do
+    (ienv, mret) <- runStmts (body f) $ setLocs (argLocs f `zip` args) $ oenv{vars=M.empty}
+    let updates = case (outArgLocs f, returns f) of
             ([], False) -> []  -- no value returned
             ([], True) -> do  -- value returned, but no out args
                 case (mret, mout, catMaybes argouts) of
@@ -91,7 +142,7 @@ runFunction f genv olenv args argouts mout = do
                     (Just _, _, _) -> error "Many places for one result? Fuck you!"
                     (Nothing, _, _) -> error "No value returned althought expected"
             ([oan], False) -> do  -- exactly one out arg in this function
-                let retval = ilenv' M.! oan
+                let retval = getLoc oan ienv
                 case (mret, mout, catMaybes argouts) of
                     (Nothing, Nothing, []) -> error "Result ignored!"
                     (Nothing, Nothing, [loc]) -> [(loc, retval)]
@@ -107,50 +158,58 @@ runFunction f genv olenv args argouts mout = do
                     unpack (Nothing, _) = Nothing
                 let mappedOuts = mapMaybe (\(an, ao) -> ao >> Just an) (zip (argNames f) argouts)
                 when (mappedOuts /= outArgs f) $ error $ "Args with arrows don't match with signature"
-                retupdate ++ mapMaybe unpack (argouts `zip` (map (ilenv' M.!) $ (map Loc $ argNames f)))
-    return $ M.fromList updates `M.union` olenv
+                retupdate ++ mapMaybe unpack (argouts `zip` (map (flip getLoc ienv) $ (argLocs f)))
+    return $ setLocs updates oenv
 
-runStmts :: [AST.Stmt] -> GlobEnv -> LocEnv -> IO (LocEnv, Maybe Value)
-runStmts stmts genv lenv = do
-    (lenv', mmret) <- foldM runStmtOrReturn (lenv, Nothing) stmts
+runStmts :: [AST.Stmt] -> Env -> IO (Env, Maybe Value)
+runStmts stmts env = do
+    stmts' <- fixIfs stmts
+    (env', mmret) <- foldM runStmtOrReturn (env, Nothing) stmts'
     let mret = (mmret >>= id) -- Nothing->Nothing|Just x->x
-    return (lenv', mret)
+    return (env', mret)
     where
-        runStmtOrReturn (lenv'', Just retval) _ = return (lenv'', Just retval)
-        runStmtOrReturn (lenv'', Nothing) stmt = runStmt stmt genv lenv''
+        fixIfs [] = []
+        fixIfs (AST.StmtIf{}
+        fixIfs (AST.StmtElif{}:_) = error $ "Unexpected elif clause"
+        fixIfs (AST.StmtElse{}:_) = error $ "Unexpected else clause"
+        isElif (AST.StmtElif{}) = True
+        isElif _ = False
+        runStmtOrReturn (env'', Just retval) _ = return (env'', Just retval)
+        runStmtOrReturn (env'', Nothing) stmt = runStmt stmt env''
 
-runStmt :: AST.Stmt -> GlobEnv -> LocEnv -> IO (LocEnv, Maybe (Maybe Value))
-runStmt (AST.StmtPass) _genv lenv = return (lenv, Nothing)
-runStmt (AST.StmtReturn) _genv lenv = return (lenv, Just Nothing)
-runStmt (AST.StmtReturnValue expr) genv lenv = do
-    val <- runPureExpr expr genv lenv
-    return (lenv, Just $ Just val)
-runStmt (AST.StmtPrint exprs) genv lenv = do
+runStmt :: AST.Stmt -> Env -> IO (Env, Maybe (Maybe Value))
+runStmt (AST.StmtPass) env = return (env, Nothing)
+runStmt (AST.StmtReturn) env = return (env, Just Nothing)
+runStmt (AST.StmtReturnValue expr) env = do
+    val <- runPureExpr expr env
+    return (env, Just $ Just val)
+runStmt (AST.StmtPrint exprs) env = do
     forM_ exprs $ \expr -> do
-        val <- runPureExpr expr genv lenv
-        putStr $ show val ++ " "
+        val <- runPureExpr expr env
+        putStr $ showVal val ++ " "
     putStrLn ""
-    return (lenv, Nothing)
-runStmt (AST.StmtAssert expr) genv lenv = do
-    val <- runPureExpr expr genv lenv
-    when (val == 0) $ error $ "Assertion failed: " ++ (printTree expr)
-    return (lenv, Nothing)
--- runStmt (AST.StmtLet locExp expr) genv lenv = do
---     let destLoc = expAsLoc locExp genv lenv
---     when (destLoc `M.member` lenv) $ error $ "Variable redefined: " ++ (show destLoc)
---     val <- runPureExpr expr genv lenv
---     return (M.insert destLoc val lenv, Nothing)
-runStmt (AST.StmtLAssign locExp expr) genv lenv = do
-    let destLoc = expAsLoc locExp genv lenv
---     when (destLoc `M.notMember` lenv) $ error $ "Variable undefined: " ++ (show destLoc)
-    lenv' <- runNonPureExpr (Just destLoc) expr genv lenv
-    return (lenv', Nothing)
-runStmt (AST.StmtRAssign expr locExp) genv lenv = do
-    runStmt (AST.StmtLAssign locExp expr) genv lenv
-runStmt (AST.StmtExp expr) genv lenv = do
-    lenv' <- runNonPureExpr Nothing expr genv lenv
-    return (lenv', Nothing)
-runStmt stmt _genv _lenv = error $ "runStmt not yet implemented for " ++ (printTree stmt)
+    return (env, Nothing)
+runStmt (AST.StmtAssert expr) env = do
+    val <- runPureExpr expr env
+    case val of
+         ValBool True -> return (env, Nothing)
+         ValBool False -> error $ "Assertion failed: " ++ (printTree expr)
+         _ -> error $ "Assertion condition is a bool: " ++ (printTree expr)
+
+-- runStmt (AST.StmtLet locExp expr) env = do
+--     let destLoc = expAsLoc locExp env
+--     val <- runPureExpr expr env
+--     return (M.insert destLoc val env, Nothing)
+runStmt (AST.StmtLAssign locExp expr) env = do
+    let destLoc = expAsLoc locExp env
+    env' <- runNonPureExpr (Just destLoc) expr env
+    return (env', Nothing)
+runStmt (AST.StmtRAssign expr locExp) env = do
+    runStmt (AST.StmtLAssign locExp expr) env
+runStmt (AST.StmtExp expr) env = do
+    env' <- runNonPureExpr Nothing expr env
+    return (env', Nothing)
+runStmt stmt _env = error $ "runStmt not yet implemented for " ++ (printTree stmt)
 -- ###StmtLet.          Stmt ::= "let" Exp60 "=" Exp ;
 -- StmtTypedLet.     Stmt ::= "let" Exp71 Name "=" Exp ;
 -- ###StmtAssign.       Stmt ::= Exp "<-" Exp ;
@@ -170,38 +229,31 @@ runStmt stmt _genv _lenv = error $ "runStmt not yet implemented for " ++ (printT
 -- StmtCase.        Stmt ::= "case" [Exp] ":" "{" [CasePattern] "}";
 -- internal StmtIfElse. Stmt ::= "if" Exp Block [ElifClause];
 
-runPureExpr :: AST.Exp -> GlobEnv -> LocEnv -> IO Value
-runPureExpr (AST.ExpArrow _) _genv _lenv = error "Pure expression expected, but -> found"
-runPureExpr locExp@(AST.ExpVoT _) genv lenv = do
-    let loc = expAsLoc locExp genv lenv
-    case M.lookup loc lenv of
-         Just val -> return val
-         Nothing -> error $ "No such variable: " ++ (show loc)
-runPureExpr (AST.ExpInt i) _genv _lenv = return $ fromInteger i
-runPureExpr (AST.ExpAnd lexp rexp) genv lenv = runPureBinOp (.&.) lexp rexp genv lenv
-runPureExpr (AST.ExpOr lexp rexp) genv lenv = runPureBinOp (.|.) lexp rexp genv lenv
-runPureExpr (AST.ExpCmp lexp cmpOp rexp) genv lenv = do
-    runPureBinOp op lexp rexp genv lenv
-    where
-        op x y = if cmpOpFun cmpOp x y then 1 else 0
-runPureExpr (AST.ExpAdd lexp rexp) genv lenv = runPureBinOp (+) lexp rexp genv lenv
-runPureExpr (AST.ExpSub lexp rexp) genv lenv = runPureBinOp (-) lexp rexp genv lenv
-runPureExpr (AST.ExpMul lexp rexp) genv lenv = runPureBinOp (*) lexp rexp genv lenv
--- runPureExpr (AST.ExpDiv lexp rexp) genv lenv = runPureBinOp (/) lexp rexp genv lenv
-runPureExpr (AST.ExpDivInt lexp rexp) genv lenv = runPureBinOp (div) lexp rexp genv lenv
-runPureExpr (AST.ExpMod lexp rexp) genv lenv = runPureBinOp (mod) lexp rexp genv lenv
-runPureExpr _expr@(AST.ExpCall fexp argExps) genv lenv = do
+runPureExpr :: AST.Exp -> Env -> IO Value
+runPureExpr (AST.ExpArrow _) _env = error "Pure expression expected, but -> found"
+runPureExpr locExp@(AST.ExpVoT _) env = do
+    return $ getLoc (expAsLoc locExp env) env
+runPureExpr (AST.ExpInt i) _env = return $ ValInt $ fromInteger i
+runPureExpr (AST.ExpAnd lexp rexp) env = runPureBinOp (wrapBoolOp (&&)) lexp rexp env
+runPureExpr (AST.ExpOr lexp rexp) env = runPureBinOp (wrapBoolOp (||)) lexp rexp env
+runPureExpr (AST.ExpCmp lexp cmpOp rexp) env = do
+    runPureBinOp (cmpOpFun cmpOp) lexp rexp env
+runPureExpr (AST.ExpAdd lexp rexp) env = runPureBinOp (wrapIntOp (+)) lexp rexp env
+runPureExpr (AST.ExpSub lexp rexp) env = runPureBinOp (wrapIntOp (-)) lexp rexp env
+runPureExpr (AST.ExpMul lexp rexp) env = runPureBinOp (wrapIntOp (*)) lexp rexp env
+-- runPureExpr (AST.ExpDiv lexp rexp) env = runPureBinOp (/) lexp rexp env
+runPureExpr (AST.ExpDivInt lexp rexp) env = runPureBinOp (wrapIntOp div) lexp rexp env
+runPureExpr (AST.ExpMod lexp rexp) env = runPureBinOp (wrapIntOp mod) lexp rexp env
+runPureExpr _expr@(AST.ExpCall fexp argExps) env = do
     function <- case fexp of
-        AST.ExpVoT [AST.Name (_, fname)] -> return $ (functions genv) M.! fname
+        AST.ExpVoT [AST.Name (_, fname)] -> return $ (functions env) M.! fname
         _ -> error $ "Not callable: " ++ (printTree fexp)
     argVals <- forM argExps $ \expr -> do
-        runPureExpr expr genv lenv
+        runPureExpr expr env
     let argouts = map (const Nothing) argVals
-    lenv' <- runFunction function genv lenv argVals argouts (Just resloc)
-    return $ lenv' M.! resloc
-    where
-        resloc = Loc "$"
-runPureExpr expr _genv _lenv = error $ "runPureExpr not yet implemented for " ++ (printTree expr)
+    env' <- runFunction function env argVals argouts (Just $ varLoc "$")
+    return $ getLoc (varLoc "$") env'
+runPureExpr expr _env = error $ "runPureExpr not yet implemented for " ++ (printTree expr)
 
 -- ExpAnd. Exp2 ::= Exp2 "and" Exp4 ;
 --
@@ -233,63 +285,77 @@ runPureExpr expr _genv _lenv = error $ "runPureExpr not yet implemented for " ++
 -- ExpVoT.       Exp71 ::= [Name] ; -- var or type
 -- ExpSubscript. Exp71 ::= Exp71 "[" [Exp] "]" ;  -- index projection or generic instantiation
 
-runNonPureExpr :: Maybe Loc -> AST.Exp -> GlobEnv -> LocEnv -> IO LocEnv
-runNonPureExpr _ (AST.ExpArrow _) _genv _lenv = error "Unexpected ->"
-runNonPureExpr mdest expr@(AST.ExpCall fexp args) genv lenv = do
+runNonPureExpr :: Maybe Loc -> AST.Exp -> Env -> IO Env
+runNonPureExpr _ (AST.ExpArrow _) _env = error "Unexpected ->"
+runNonPureExpr mdest expr@(AST.ExpCall fexp args) env = do
     function <- case fexp of
-        AST.ExpVoT [AST.Name (_, fname)] -> return $ (functions genv) M.! fname
+        AST.ExpVoT [AST.Name (_, fname)] -> return $ (functions env) M.! fname
         _ -> error $ "Not callable: " ++ (printTree fexp)
     (argExps, argouts) <- liftM unzip $ forM args (\arg -> do
             case arg of
-                AST.ExpArrow arg' -> return (arg', Just $ expAsLoc arg' genv lenv)
+                AST.ExpArrow arg' -> return (arg', Just $ expAsLoc arg' env)
                 _ -> return (arg, Nothing)
         )
     when ((isNothing mdest) && (null $ catMaybes argouts)) $ error $ "Non-pure expression expected, but found pure expression " ++ (printTree expr)
-    argVals <- forM argExps $ \e -> runPureExpr e genv lenv
-    runFunction function genv lenv argVals argouts mdest
-runNonPureExpr (Just dest) expr genv lenv = do
-    val <- runPureExpr expr genv lenv
-    return $ M.insert dest val lenv
-runNonPureExpr Nothing expr@(AST.ExpAnd lexp rexp) genv lenv = runNonPureBinOp (.&.) expr lexp rexp genv lenv
-runNonPureExpr Nothing expr@(AST.ExpOr lexp rexp) genv lenv = runNonPureBinOp (.|.) expr lexp rexp genv lenv
-runNonPureExpr Nothing expr@(AST.ExpCmp lexp cmpOp rexp) genv lenv = do
-    runNonPureBinOp op expr lexp rexp genv lenv
-    where
-        op x y = if cmpOpFun cmpOp x y then 1 else 0
-runNonPureExpr Nothing expr@(AST.ExpAdd lexp rexp) genv lenv = runNonPureBinOp (+) expr lexp rexp genv lenv
-runNonPureExpr Nothing expr@(AST.ExpSub lexp rexp) genv lenv = runNonPureBinOp (-) expr lexp rexp genv lenv
-runNonPureExpr Nothing expr@(AST.ExpMul lexp rexp) genv lenv = runNonPureBinOp (*) expr lexp rexp genv lenv
--- runNonPureExpr Nothing expr@(AST.ExpDiv lexp rexp) genv lenv = runNonPureBinOp (/) expr lexp rexp genv lenv
-runNonPureExpr Nothing expr@(AST.ExpDivInt lexp rexp) genv lenv = runNonPureBinOp (div) expr lexp rexp genv lenv
-runNonPureExpr Nothing expr@(AST.ExpMod lexp rexp) genv lenv = runNonPureBinOp (mod) expr lexp rexp genv lenv
-runNonPureExpr _ expr _genv _lenv = error $ "Non-pure expression expected, but found pure expression " ++ (printTree expr)
+    argVals <- forM argExps $ \e -> runPureExpr e env
+    runFunction function env argVals argouts mdest
+runNonPureExpr (Just dest) expr env = do
+    val <- runPureExpr expr env
+    return $ setLoc dest val env
+runNonPureExpr Nothing expr@(AST.ExpAnd lexp rexp) env = runNonPureBinOp (wrapBoolOp (&&)) expr lexp rexp env
+runNonPureExpr Nothing expr@(AST.ExpOr lexp rexp) env = runNonPureBinOp (wrapBoolOp (||)) expr lexp rexp env
+runNonPureExpr Nothing expr@(AST.ExpCmp lexp cmpOp rexp) env = do
+    runNonPureBinOp (cmpOpFun cmpOp) expr lexp rexp env
+runNonPureExpr Nothing expr@(AST.ExpAdd lexp rexp) env = runNonPureBinOp (wrapIntOp (+)) expr lexp rexp env
+runNonPureExpr Nothing expr@(AST.ExpSub lexp rexp) env = runNonPureBinOp (wrapIntOp (-)) expr lexp rexp env
+runNonPureExpr Nothing expr@(AST.ExpMul lexp rexp) env = runNonPureBinOp (wrapIntOp (*)) expr lexp rexp env
+-- runNonPureExpr Nothing expr@(AST.ExpDiv lexp rexp) env = runNonPureBinOp (/) expr lexp rexp env
+runNonPureExpr Nothing expr@(AST.ExpDivInt lexp rexp) env = runNonPureBinOp (wrapIntOp div) expr lexp rexp env
+runNonPureExpr Nothing expr@(AST.ExpMod lexp rexp) env = runNonPureBinOp (wrapIntOp mod) expr lexp rexp env
+runNonPureExpr _ expr _env = error $ "Non-pure expression expected, but found pure expression " ++ (printTree expr)
 
 
-runNonPureBinOp :: BinOpF -> AST.Exp -> AST.Exp -> AST.Exp -> GlobEnv -> LocEnv -> IO LocEnv
-runNonPureBinOp op wholeExpr lexp rexp genv lenv = do
+runNonPureBinOp :: BinOpF -> AST.Exp -> AST.Exp -> AST.Exp -> Env -> IO Env
+runNonPureBinOp op wholeExpr lexp rexp env = do
     (locExp, lexp', rexp') <- case (lexp, rexp) of
             (AST.ExpArrow _, AST.ExpArrow _) -> error $ "Multiple arrows in " ++ (printTree wholeExpr)
             (AST.ExpArrow lexp', _) -> return (lexp', lexp', rexp)
             (_, AST.ExpArrow rexp') -> return (rexp', lexp, rexp')
             _ -> error $ "runNonPureBinOp: non-pure expression expected, but no arrows found " ++ (printTree wholeExpr)
-    let destLoc = expAsLoc locExp genv lenv
-    val <- runPureBinOp op lexp' rexp' genv lenv
-    return $ M.insert destLoc val lenv
+    let destLoc = expAsLoc locExp env
+    val <- runPureBinOp op lexp' rexp' env
+    return $ setLoc destLoc val env
 
-runPureBinOp :: BinOpF -> AST.Exp -> AST.Exp -> GlobEnv -> LocEnv -> IO Value
-runPureBinOp op lexp rexp genv lenv = do
-    lval <- runPureExpr lexp genv lenv
-    rval <- runPureExpr rexp genv lenv
+runPureBinOp :: BinOpF -> AST.Exp -> AST.Exp -> Env -> IO Value
+runPureBinOp op lexp rexp env = do
+    lval <- runPureExpr lexp env
+    rval <- runPureExpr rexp env
     return $ lval `op` rval
 
-expAsLoc :: AST.Exp -> GlobEnv -> LocEnv -> Loc
-expAsLoc (AST.ExpVoT [AST.Name (_, varName)]) _genv _lenv = Loc varName  -- TODO: check existence
-expAsLoc destExp _genv _lenv = error $ "Not lvalue or not yet handled as lvalue: " ++ (printTree destExp)
+expAsLoc :: AST.Exp -> Env -> Loc
+expAsLoc (AST.ExpVoT [AST.Name (_, varName)]) _env = Loc varName []  -- TODO: check existence
+expAsLoc destExp _env = error $ "Not lvalue or not yet handled as lvalue: " ++ (printTree destExp)
 
-cmpOpFun :: AST.CmpOp -> (Value -> Value -> Bool)
-cmpOpFun AST.EqOp = (==)
-cmpOpFun AST.NeOp = (/=)
-cmpOpFun AST.LtOp = (<)
-cmpOpFun AST.GtOp = (>)
-cmpOpFun AST.LeOp = (<=)
-cmpOpFun AST.GeOp = (>=)
+wrapBoolOp :: (Bool -> Bool -> Bool) -> (Value -> Value -> Value)
+wrapBoolOp op (ValBool b1) (ValBool b2) = ValBool $ b1 `op` b2
+wrapBoolOp _ bad (ValBool _) = error $ "Not a bool: " ++ (show bad)
+wrapBoolOp _ _ bad = error $ "Not a bool: " ++ (show bad)
+
+wrapIntOp :: (Int -> Int -> Int) -> (Value -> Value -> Value)
+wrapIntOp op (ValInt i1) (ValInt i2) = ValInt $ i1 `op` i2
+wrapIntOp _ bad (ValInt _) = error $ "Not an integer: " ++ (show bad)
+wrapIntOp _ _ bad = error $ "Not an integer: " ++ (show bad)
+
+wrapCmpOp :: (Int -> Int -> Bool) -> (String -> String -> Bool) -> (Char -> Char -> Bool) -> (Value -> Value -> Value)
+wrapCmpOp op _ _ (ValInt v1) (ValInt v2) = ValBool $ v1 `op` v2
+wrapCmpOp _ op _ (ValString v1) (ValString v2) = ValBool $ v1 `op` v2
+wrapCmpOp _ _ op (ValChar v1) (ValChar v2) = ValBool $ v1 `op` v2
+wrapCmpOp _ _ _ _ _ = error $ "wrapCmpOp: Incorrect or conflicting argument types"
+
+cmpOpFun :: AST.CmpOp -> (Value -> Value -> Value)
+cmpOpFun AST.EqOp = (ValBool.).(==)
+cmpOpFun AST.NeOp = (ValBool.).(/=)
+cmpOpFun AST.LtOp = wrapCmpOp (<) (<) (<)
+cmpOpFun AST.GtOp = wrapCmpOp (>) (>) (>)
+cmpOpFun AST.LeOp = wrapCmpOp (<=) (<=) (<=)
+cmpOpFun AST.GeOp = wrapCmpOp (>=) (>=) (>=)
