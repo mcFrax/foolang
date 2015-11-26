@@ -49,13 +49,13 @@ separator Type "," ;
 
 -- StmtLet.          Stmt ::= "let" Exp60 "=" Exp ; -- may be a tuple
 -- StmtTypedLet.     Stmt ::= "let" Exp71 Name "=" Exp ;
-StmtLAssign.      Stmt ::= Exp "<-" Exp ;
-StmtRAssign.      Stmt ::= Exp "->" Exp ;
-StmtPass.         Stmt ::= "pass" ;
-StmtAssert.       Stmt ::= "assert" Exp ;
-StmtStatAssert.   Stmt ::= "static" "assert" Exp ;
-StmtPrint.        Stmt ::= "!" [Exp] ;
-StmtExp.          Stmt ::= Exp ;
+StmtLAssign.     Stmt ::= Exp "<-" Exp ;
+StmtRAssign.     Stmt ::= Exp "->" Exp ;
+StmtPass.        Stmt ::= "pass" ;
+StmtAssert.      Stmt ::= "assert" Exp ;
+StmtStatAssert.  Stmt ::= "static" "assert" Exp ;
+StmtPrint.       Stmt ::= "!" [Exp] ;
+StmtExp.         Stmt ::= Exp ;
 StmtReturn.      Stmt ::= "return" ;
 StmtReturnValue. Stmt ::= "return" Exp ;
 StmtIf.          Stmt ::= "if" Exp Block ;
@@ -64,6 +64,8 @@ StmtElse.        Stmt ::= "else" Block ;
 StmtWhile.       Stmt ::= "while" Exp  Block ;
 StmtForIn.       Stmt ::= "for" Name "in" Exp Block ;
 StmtForVarIn.    Stmt ::= "for" "->" Name "in" Exp Block ;
+StmtBreak.       Stmt ::= "break" ;
+StmtContinue.    Stmt ::= "continue" ;
 StmtCase.        Stmt ::= "case" [Exp] ":" "{" [CasePattern] "}";
 internal StmtIfElse. Stmt ::= "if" Exp Block [ElifClause];
 separator CasePattern ";" ;
@@ -100,6 +102,9 @@ ExpCall. Exp55 ::= Exp60 "(" [Exp] ")" ;
 
 ExpInt.   Exp60 ::= Integer ;
 ExpStr.   Exp60 ::= String ;
+ExpChar.  Exp60 ::= Char ;
+ExpTrue.  Exp60 ::= "True" ;
+ExpFalse. Exp60 ::= "False" ;
 ExpArray. Exp60 ::= "[" [Exp] "]" ;
 ExpTuple. Exp60 ::= "(" Exp "," [Exp] ")" ;
 

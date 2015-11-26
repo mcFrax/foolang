@@ -27,17 +27,21 @@ fun main():
     foo(-> a, b) -> c # same as above
     ! a, b, c
     swap(->b, ->c)
-    !a, b, c
+    ! a, b, c
     swap(->a, ->b)
-    !a, b, c
+    ! a, b, c
+    ! "factorial"
+    ! factorial(0), factorial(1), factorial(2), factorial(3), factorial(4), factorial(5)
+    #! "factorial1"
+    #! factorial1(0), factorial1(1), factorial1(2), factorial1(3), factorial1(4), factorial1(5)
 
-fun factorial(Int n):
+fun factorial(Int n) -> Int:
     if n < 2:
         return 1
     else:
         return n * factorial(n-1)
 
-fun factorial1(Int n):
+fun factorial1(Int n) -> Int:
     result <- 1
     for i in 2..n:
         -> result * i

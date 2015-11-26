@@ -6,7 +6,6 @@ import Control.Monad
 -- import Control.Monad.State.Class
 -- import qualified Data.List as L
 import qualified Data.Map.Strict as M
-import Data.List
 import Data.Maybe
 -- import qualified Data.Set as S
 import qualified Debug.Trace
@@ -45,7 +44,7 @@ setLoc (Loc vname fieldPath) newVal env = do
     where
         f mval = do
             Just $ setField fieldPath newVal $ case mval of
-                Nothing -> error $ "Variable " ++ vname ++ " undefined"
+                Nothing -> error $ "setLoc: Variable " ++ vname ++ " undefined"
                     -- it is actually an error only when fieldPath /= []
                 (Just oldVal) -> oldVal
 
@@ -56,7 +55,7 @@ getLoc :: Loc -> Env -> Value
 getLoc (Loc vname fieldPath) env = do
     case M.lookup vname $ vars env of
         Just val -> getField fieldPath val
-        Nothing -> error $ "Variable " ++ vname ++ " undefined"
+        Nothing -> error $ "getLoc: Variable " ++ vname ++ " undefined"
 
 setField :: [AttrOrIdx] -> Value -> Value -> Value
 setField [] newVal _oldVal = newVal
@@ -130,7 +129,8 @@ topDefSem _ topDef = error $ "topDefSem not yet implemented for " ++ (printTree 
 
 runFunction :: Function -> Env -> [Value] -> [Maybe Loc] -> Maybe Loc -> IO Env
 runFunction f oenv args argouts mout = do
-    (ienv, mret) <- runStmts (body f) $ setLocs (argLocs f `zip` args) $ oenv{vars=M.empty}
+    (ienv, mmret) <- runStmts (body f) $ setLocs (argLocs f `zip` args) $ oenv{vars=M.empty}
+    let mret = (mmret >>= id)
     let updates = case (outArgLocs f, returns f) of
             ([], False) -> []  -- no value returned
             ([], True) -> do  -- value returned, but no out args
@@ -161,19 +161,29 @@ runFunction f oenv args argouts mout = do
                 retupdate ++ mapMaybe unpack (argouts `zip` (map (flip getLoc ienv) $ (argLocs f)))
     return $ setLocs updates oenv
 
-runStmts :: [AST.Stmt] -> Env -> IO (Env, Maybe Value)
+runStmts :: [AST.Stmt] -> Env -> IO (Env, Maybe (Maybe Value))
 runStmts stmts env = do
     stmts' <- fixIfs stmts
-    (env', mmret) <- foldM runStmtOrReturn (env, Nothing) stmts'
-    let mret = (mmret >>= id) -- Nothing->Nothing|Just x->x
-    return (env', mret)
+    foldM runStmtOrReturn (env, Nothing) stmts'
     where
-        fixIfs [] = []
-        fixIfs (AST.StmtIf{}
+        fixIfs :: [AST.Stmt] -> IO [AST.Stmt]
+        fixIfs [] = return []
+        fixIfs ((AST.StmtIf cond block):stmts') = do
+            let (elifs, stmts'') = takeElifs stmts'
+            stmts''' <- fixIfs stmts''
+            return $ (AST.StmtIfElse cond block elifs):stmts'''
         fixIfs (AST.StmtElif{}:_) = error $ "Unexpected elif clause"
         fixIfs (AST.StmtElse{}:_) = error $ "Unexpected else clause"
-        isElif (AST.StmtElif{}) = True
-        isElif _ = False
+        fixIfs (stmt:ss) = do
+            rest <- fixIfs ss
+            return $ stmt:rest
+        takeElifs :: [AST.Stmt] -> ([AST.ElifClause], [AST.Stmt])
+        takeElifs ((AST.StmtElif cond block):stmts') = do
+            let (elifs, stmts'') = takeElifs stmts'
+            ((AST.Elif cond block):elifs, stmts'')
+        takeElifs ((AST.StmtElse block):stmts') = do
+            ([(AST.Elif AST.ExpTrue block)], stmts')
+        takeElifs stmts' = ([], stmts')
         runStmtOrReturn (env'', Just retval) _ = return (env'', Just retval)
         runStmtOrReturn (env'', Nothing) stmt = runStmt stmt env''
 
@@ -209,6 +219,13 @@ runStmt (AST.StmtRAssign expr locExp) env = do
 runStmt (AST.StmtExp expr) env = do
     env' <- runNonPureExpr Nothing expr env
     return (env', Nothing)
+runStmt (AST.StmtIfElse cond (AST.Blk stmts) elifs) env = do
+    condVal <- runPureExpr cond env
+    if asBool condVal then
+        runStmts stmts env
+    else case elifs of
+        (AST.Elif cond' blk'):elifs' -> runStmt (AST.StmtIfElse cond' blk' elifs') env
+        [] -> return (env, Nothing)
 runStmt stmt _env = error $ "runStmt not yet implemented for " ++ (printTree stmt)
 -- ###StmtLet.          Stmt ::= "let" Exp60 "=" Exp ;
 -- StmtTypedLet.     Stmt ::= "let" Exp71 Name "=" Exp ;
@@ -231,9 +248,13 @@ runStmt stmt _env = error $ "runStmt not yet implemented for " ++ (printTree stm
 
 runPureExpr :: AST.Exp -> Env -> IO Value
 runPureExpr (AST.ExpArrow _) _env = error "Pure expression expected, but -> found"
+runPureExpr AST.ExpTrue _env = return $ ValBool True
+runPureExpr AST.ExpFalse _env = return $ ValBool False
+runPureExpr (AST.ExpInt i) _env = return $ ValInt $ fromInteger i
+runPureExpr (AST.ExpChar c) _env = return $ ValChar c
+runPureExpr (AST.ExpStr s) _env = return $ ValString s
 runPureExpr locExp@(AST.ExpVoT _) env = do
     return $ getLoc (expAsLoc locExp env) env
-runPureExpr (AST.ExpInt i) _env = return $ ValInt $ fromInteger i
 runPureExpr (AST.ExpAnd lexp rexp) env = runPureBinOp (wrapBoolOp (&&)) lexp rexp env
 runPureExpr (AST.ExpOr lexp rexp) env = runPureBinOp (wrapBoolOp (||)) lexp rexp env
 runPureExpr (AST.ExpCmp lexp cmpOp rexp) env = do
@@ -337,14 +358,10 @@ expAsLoc (AST.ExpVoT [AST.Name (_, varName)]) _env = Loc varName []  -- TODO: ch
 expAsLoc destExp _env = error $ "Not lvalue or not yet handled as lvalue: " ++ (printTree destExp)
 
 wrapBoolOp :: (Bool -> Bool -> Bool) -> (Value -> Value -> Value)
-wrapBoolOp op (ValBool b1) (ValBool b2) = ValBool $ b1 `op` b2
-wrapBoolOp _ bad (ValBool _) = error $ "Not a bool: " ++ (show bad)
-wrapBoolOp _ _ bad = error $ "Not a bool: " ++ (show bad)
+wrapBoolOp op v1 v2 = ValBool $ asBool v1 `op` asBool v2
 
 wrapIntOp :: (Int -> Int -> Int) -> (Value -> Value -> Value)
-wrapIntOp op (ValInt i1) (ValInt i2) = ValInt $ i1 `op` i2
-wrapIntOp _ bad (ValInt _) = error $ "Not an integer: " ++ (show bad)
-wrapIntOp _ _ bad = error $ "Not an integer: " ++ (show bad)
+wrapIntOp op v1 v2 = ValInt $ asInt v1 `op` asInt v2
 
 wrapCmpOp :: (Int -> Int -> Bool) -> (String -> String -> Bool) -> (Char -> Char -> Bool) -> (Value -> Value -> Value)
 wrapCmpOp op _ _ (ValInt v1) (ValInt v2) = ValBool $ v1 `op` v2
