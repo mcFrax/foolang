@@ -1,13 +1,10 @@
+{-# OPTIONS -XFlexibleInstances #-}
 module Semantics where
 
--- import Control.DeepSeq
 import Control.Monad
 import Control.Monad.State
-import Control.Monad.Reader
--- import qualified Data.List as L
 import qualified Data.Map.Strict as M
 import Data.Maybe
--- import qualified Data.Set as S
 import qualified Debug.Trace
 
 -- import System.IO
@@ -26,19 +23,19 @@ data Err = Err String
 showSemError :: Err -> String
 showSemError (Err s) = "ERR: " ++ s
 
-data GlobEnv = GlobEnv {
+data Env = Env {
     types :: M.Map String Type,
     functions :: M.Map String Function,
     variants :: M.Map String String,  -- variant -> type
-    nextTmp :: Int
+    nextTmp :: Int,
+    vars :: Vars
 }
 
-newtype LocEnv = LocEnv {
-    vars :: M.Map String ()
-}
+type Vars = M.Map String ()
 
-newtype RunEnv = RLocEnv {
-    rvars :: M.Map String Value
+data RunEnv = RunEnv {
+    staticEnv :: Env,
+    varVals :: M.Map String Value
 }
 
 data Loc = Loc String [AttrOrIdx] deriving (Eq, Ord, Show)
@@ -56,7 +53,7 @@ varLoc vname = Loc vname []
 
 setLoc :: Loc -> Value -> RunEnv -> RunEnv
 setLoc (Loc vname fieldPath) newVal env = do
-    env{rvars=M.alter f vname $ rvars env}
+    env{varVals=M.alter f vname $ varVals env}
     where
         f mval = do
             Just $ setField fieldPath newVal $ case mval of
@@ -69,7 +66,7 @@ setLocs assocs env = foldl (\e (l, v) -> setLoc l v e) env assocs
 
 getLoc :: Loc -> RunEnv -> Value
 getLoc (Loc vname fieldPath) env = do
-    case M.lookup vname $ rvars env of
+    case M.lookup vname $ varVals env of
         Just val -> getField fieldPath val
         Nothing -> error $ "getLoc: Variable " ++ vname ++ " undefined"
 
@@ -118,19 +115,24 @@ showVal (ValString s) = show s
 
 type BinOpF = (Value -> Value -> Value)
 
+instance Show (Value -> Value -> Value) where
+    show _ = "<BinOpF>"
+
 type QLoc = Loc
 type QOp = BinOpF
 data QVal = QValConst Value
           | QValVar Loc
+          deriving Show
 data Quad = Quad4 QLoc QVal QOp QVal
           | Quad2 QLoc QVal
-          | QCall String [QVal] [QLoc]
+          | QCall String [QVal] [Maybe QLoc]
           | QLoop QVal QuadCode
           | QBranch [(QVal, QuadCode)]
           | QReturn (Maybe QVal)
           | QAssert QVal
           | QPrint [QVal]
           | QInvalid  -- needed?
+          deriving Show
 
 type QuadCode = [Quad]
 
@@ -139,7 +141,7 @@ type QuadCode = [Quad]
 data SemState = SemState {
     semContext :: Context,
     semErrors :: [Err],
-    semEnv :: GlobEnv
+    semEnv :: Env
 }
 
 type Context = [ContextLevel]
@@ -147,6 +149,8 @@ type Context = [ContextLevel]
 type ContextLevel = String
 
 type TCM = State SemState
+
+type Run = StateT RunEnv IO
 
 inContext :: ContextLevel -> TCM a -> TCM a
 inContext ctx tcm = do
@@ -159,16 +163,25 @@ inContext ctx tcm = do
 mkCtx :: (Int, Int) -> String -> String
 mkCtx (line, col) s = (show line) ++ ":" ++ (show col) ++ ":" ++ s
 
-reportError :: String -> TCM ()
+reportError :: String -> TCM a
 reportError errmsg = do
     st <- get
     let err = Err $ (show $ semContext st) ++ ": " ++ errmsg
     modify (\ss -> ss{semErrors=err:semErrors st})
+    return $ error "invalid [error reported]"
 
-runModule :: GlobEnv -> IO ()
-runModule env = execQuad env $ QCall "main"  [] []
+modifyEnv :: (Env -> Env) -> TCM ()
+modifyEnv f = modify (\ss -> ss{semEnv=f $ semEnv ss})
 
-moduleSem :: AST.Module -> String -> Either [Err] GlobEnv
+modifyVars :: (Vars -> Vars) -> TCM ()
+modifyVars f = modifyEnv (\env -> env{vars=f $ vars env})
+
+runModule :: Env -> IO ()
+runModule env = do
+    _ <- execStateT (execQuad $ QCall "main" [] []) $ RunEnv env M.empty
+    return ()
+
+moduleSem :: AST.Module -> String -> Either [Err] Env
 moduleSem (AST.Mod topDefs) _fileName = do
     ss <- return $ execState (do
                 forM_ topDefs topDefSem
@@ -180,7 +193,7 @@ moduleSem (AST.Mod topDefs) _fileName = do
         [] -> Right $ semEnv ss
         _ -> Left $ reverse $ semErrors ss
     where
-        initialEnv = GlobEnv (M.fromList [("Int", Type)]) M.empty M.empty 0
+        initialEnv = Env (M.fromList [("Int", Type)]) M.empty M.empty 0 M.empty
 
 topDefSem :: AST.TopDef -> TCM ()
 topDefSem (AST.FunDef name genArgs argdefs mrettype (AST.Blk bodyStmts)) = do
@@ -210,8 +223,9 @@ funDefSem proc (AST.Name (pos, name)) genArgDefs argdefs mrettype stmts = do
                     (True, names) -> (returnName:names, varLoc returnName:map varLoc names)
             when (not proc && null outargs) $ do
                 reportError "function with no output - should be proc"
-            let lenv = LocEnv $ M.fromList $ map (\an -> (an, ())) argnames
-            bodyQuads <- runReaderT (stmtsSem stmts) lenv
+            modifyVars $ const $ M.fromList $ map (\an -> (an, ())) argnames
+            bodyQuads <- stmtsSem stmts
+            modifyVars $ const $ vars env
             let fun = (Function {
                 argNames=argnames,
                 argLocs=map varLoc argnames,
@@ -220,24 +234,117 @@ funDefSem proc (AST.Name (pos, name)) genArgDefs argdefs mrettype stmts = do
                 body=bodyQuads,
                 isProc=proc
             })
-            modify (\ss -> ss{semEnv=env{functions=M.insert name fun $ functions env}})
+            modifyEnv (\env' -> env'{functions=M.insert name fun $ functions env'})
         else do
             reportError $ "function redefined: " ++ name
 
-type LocTCM  = ReaderT LocEnv TCM
+stmtsSem :: [AST.Stmt] -> TCM QuadCode
+stmtsSem stmts = do
+    stmts' <- fixIfs stmts
+    liftM concat $ mapM stmtSem stmts'
+    where
+        fixIfs :: [AST.Stmt] -> TCM [AST.Stmt]
+        fixIfs [] = return []
+        fixIfs ((AST.StmtIf cond block):stmts') = do
+            let (elifs, melse, stmts'') = takeElifs stmts'
+            stmts''' <- fixIfs stmts''
+            elseBlk <- case melse of
+                    Just elseBlk -> return elseBlk
+                    Nothing -> return $ AST.Blk []
+            return $ (AST.StmtIfElse cond block elifs elseBlk):stmts'''
+        fixIfs (AST.StmtElif{}:_) = error $ "Unexpected elif clause"
+        fixIfs (AST.StmtElse{}:_) = error $ "Unexpected else clause"
+        fixIfs (stmt:ss) = do
+            rest <- fixIfs ss
+            return $ stmt:rest
+        takeElifs :: [AST.Stmt] -> ([AST.ElifClause], Maybe AST.Block, [AST.Stmt])
+        takeElifs ((AST.StmtElif cond block):stmts') = do
+            let (elifs, melse, stmts'') = takeElifs stmts'
+            ((AST.Elif cond block):elifs, melse, stmts'')
+        takeElifs ((AST.StmtElse block):stmts') = do
+            ([], Just block, stmts')
+        takeElifs stmts' = ([], Nothing, stmts')
 
-stmtsSem :: [AST.Stmt] -> LocTCM QuadCode
-stmtsSem _ = do
-    lift $ reportError "stmtsSem not implemented"
-    return []
+stmtSem :: AST.Stmt -> TCM QuadCode
+stmtSem s = do
+    inContext (stmtCtx s) $ do
+        stmtSem' s
+    where
+-- StmtLAssign.     Stmt ::= Exp "<-" Exp ;
+-- StmtRAssign.     Stmt ::= Exp "->" Exp ;
+-- StmtPass.        Stmt ::= "pass" ;
+-- StmtAssert.      Stmt ::= "assert" Exp ;
+-- StmtStatAssert.  Stmt ::= "static" "assert" Exp ;
+-- StmtPrint.       Stmt ::= "!" [Exp] ;
+-- StmtExp.         Stmt ::= Exp ;
+-- StmtReturn.      Stmt ::= "return" ;
+-- StmtReturnValue. Stmt ::= "return" Exp ;
+-- StmtIf.          Stmt ::= "if" Exp Block ;
+-- StmtElif.        Stmt ::= "elif" Exp Block ;
+-- StmtElse.        Stmt ::= "else" Block ;
+-- StmtWhile.       Stmt ::= "while" Exp  Block ;
+-- StmtForIn.       Stmt ::= "for" Name "in" Exp Block ;
+-- StmtForVarIn.    Stmt ::= "for" "->" Name "in" Exp Block ;
+-- StmtBreak.       Stmt ::= "break" ;
+-- StmtContinue.    Stmt ::= "continue" ;
+-- StmtCase.        Stmt ::= "case" [Exp] ":" "{" [CasePattern] "}";
+        stmtSem' AST.StmtPass = return []
+        stmtSem' (AST.StmtPrint exprs) = do
+            (exprsQuads, exprVals) <- liftM unzip $ mapM pureExprSem exprs
+            return $ concat $ exprsQuads ++ [[QPrint exprVals]]
+        stmtSem' _ = do
+            reportError $ "stmtSem: Statement not yet implemented"
 
-execQuad :: GlobEnv -> Quad -> IO ()
-execQuad _ QInvalid = error "execQuad QInvalid"
-execQuad _ _ = error "execQuadCode not implemented yet"
+stmtCtx :: AST.Stmt -> ContextLevel
+stmtCtx = printTree
 
-expAsLoc :: AST.Exp -> LocEnv -> Loc
-expAsLoc (AST.ExpVoT [AST.Name (_, varName)]) _env = Loc varName []  -- TODO: check existence
-expAsLoc destExp _env = error $ "Not lvalue or not yet handled as lvalue: " ++ (printTree destExp)
+pureExprSem :: AST.Exp -> TCM (QuadCode, QVal)
+pureExprSem e =
+    inContext (exprCtx e) $ do
+        pureExprSem' e
+    where
+        pureExprSem' (AST.ExpInt i) = return ([], QValConst $ ValInt $ fromInteger i)
+        pureExprSem' (AST.ExpStr s) = return ([], QValConst $ ValString $ s)
+        pureExprSem' _ = do
+            reportError $ "stmtSem: Statement not yet implemented"
+
+exprCtx :: AST.Exp -> ContextLevel
+exprCtx = printTree
+
+execQuad :: Quad -> Run ()
+execQuad QInvalid = error "execQuad QInvalid"
+execQuad (QPrint qvals) = do
+    forM_ qvals $ \qval -> do
+        s <- liftM ((++ " ") . showVal) $ execQVal qval
+        lift $ putStr s
+    lift $ putStrLn ""
+execQuad (QCall fname args outs) = do
+    re <- get
+    let f = (functions $ staticEnv re) M.! fname
+    argVals <- mapM execQVal args
+    let argVars = M.fromList $ argNames f `zip` argVals
+    put re{varVals=argVars}
+    mapM_ execQuad $ body f
+    inEnv <- get
+    let re' = foldl (\re'' (inLoc, outMLoc) -> do
+                case outMLoc of
+                    Just outLoc -> do
+                        let val = getLoc inLoc inEnv
+                        setLoc outLoc val re''
+                    Nothing -> re''
+            ) re (outLocs f `zip` outs)
+    put re'
+
+execQuad quad = error $ "execQuad not implemented yet for " ++ show quad
+
+execQVal :: QVal -> Run Value
+execQVal (QValConst val) = return val
+execQVal (QValVar loc) = do
+    liftM (getLoc loc) $ get
+
+expAsLoc :: AST.Exp -> TCM Loc
+expAsLoc (AST.ExpVoT [AST.Name (_, varName)]) = return $ Loc varName []
+expAsLoc destExp = error $ "Not lvalue or not yet handled as lvalue: " ++ (printTree destExp)
 
 wrapBoolOp :: (Bool -> Bool -> Bool) -> (Value -> Value -> Value)
 wrapBoolOp op v1 v2 = ValBool $ asBool v1 `op` asBool v2
