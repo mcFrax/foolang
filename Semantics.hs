@@ -128,7 +128,7 @@ data Quad = Quad4 QLoc QVal QOp QVal
           | QCall String [QVal] [Maybe QLoc]
           | QLoop QVal QuadCode
           | QBranch [(QVal, QuadCode)]
-          | QReturn (Maybe QVal)
+          | QReturn
           | QAssert QVal
           | QPrint [QVal]
           | QInvalid  -- needed?
@@ -305,8 +305,46 @@ pureExprSem e =
     where
         pureExprSem' (AST.ExpInt i) = return ([], QValConst $ ValInt $ fromInteger i)
         pureExprSem' (AST.ExpStr s) = return ([], QValConst $ ValString $ s)
+        pureExprSem' (AST.ExpAnd lExp rExp) = pureBinOpSem (wrapBoolOp (&&)) lExp rExp
+        pureExprSem' (AST.ExpOr lExp rExp) = pureBinOpSem (wrapBoolOp (||)) lExp rExp
+        pureExprSem' (AST.ExpCmp lExp cmpOp rExp) = pureBinOpSem (cmpOpFun cmpOp) lExp rExp
+        pureExprSem' (AST.ExpAdd lExp rExp) = pureBinOpSem (wrapIntOp (+)) lExp rExp
+        pureExprSem' (AST.ExpSub lExp rExp) = pureBinOpSem (wrapIntOp (-)) lExp rExp
+        pureExprSem' (AST.ExpMul lExp rExp) = pureBinOpSem (wrapIntOp (*)) lExp rExp
+--         pureExprSem' (AST.ExpDiv lExp rExp) = pureBinOpSem (/) lExp rExp
+        pureExprSem' (AST.ExpDivInt lExp rExp) = pureBinOpSem (wrapIntOp div) lExp rExp
+        pureExprSem' (AST.ExpMod lExp rExp) = pureBinOpSem (wrapIntOp mod) lExp rExp
         pureExprSem' _ = do
             reportError $ "stmtSem: Statement not yet implemented"
+
+pureBinOpSem :: BinOpF -> AST.Exp -> AST.Exp -> TCM (QuadCode, QVal)
+pureBinOpSem op lExp rExp = do
+    (lCode, lQVal) <- pureExprSem lExp
+    (rCode, rQVal) <- pureExprSem rExp
+    case (lCode, lQVal, rCode, rQVal) of
+         -- TODO: special handling for div (error on 0) and possibly other ops (like overflow)
+         ([], QValConst lConst, [], QValConst rConst) -> do
+            return ([], QValConst $ lConst `op` rConst)
+         _ -> do
+            destLoc <- newTmpLoc
+            return (lCode ++ rCode ++ [Quad4 destLoc lQVal op rQVal], QValVar destLoc)
+
+-- runNonPureBinOp :: BinOpF -> AST.Exp -> AST.Exp -> AST.Exp -> Env -> IO Env
+-- runNonPureBinOp op wholeExpr lexp rexp env = do
+--     (locExp, lexp', rexp') <- case (lexp, rexp) of
+--             (AST.ExpArrow _, AST.ExpArrow _) -> error $ "Multiple arrows in " ++ (printTree wholeExpr)
+--             (AST.ExpArrow lexp', _) -> return (lexp', lexp', rexp)
+--             (_, AST.ExpArrow rexp') -> return (rexp', lexp, rexp')
+--             _ -> error $ "runNonPureBinOp: non-pure expression expected, but no top-level arrows found " ++ (printTree wholeExpr)
+--     let destLoc = expAsLoc locExp env
+--     val <- runPureBinOp op lexp' rexp' env
+--     return $ setLoc destLoc val env
+--
+-- runPureBinOp :: BinOpF -> AST.Exp -> AST.Exp -> Env -> IO Value
+-- runPureBinOp op lexp rexp env = do
+--     lval <- runPureExpr lexp env
+--     rval <- runPureExpr rexp env
+--     return $ lval `op` rval
 
 exprCtx :: AST.Exp -> ContextLevel
 exprCtx = printTree
@@ -316,15 +354,18 @@ execQuad QInvalid = error "execQuad QInvalid"
 execQuad (QPrint qvals) = do
     forM_ qvals $ \qval -> do
         s <- liftM ((++ " ") . showVal) $ execQVal qval
-        lift $ putStr s
-    lift $ putStrLn ""
+        liftIO $ putStr s
+    liftIO $ putStrLn ""
 execQuad (QCall fname args outs) = do
     re <- get
     let f = (functions $ staticEnv re) M.! fname
     argVals <- mapM execQVal args
     let argVars = M.fromList $ argNames f `zip` argVals
     put re{varVals=argVars}
-    mapM_ execQuad $ body f
+--     forM_ (body f) execQuad
+    forM_ (body f) $ \q -> do
+        liftIO $ print q
+        execQuad q
     inEnv <- get
     let re' = foldl (\re'' (inLoc, outMLoc) -> do
                 case outMLoc of
@@ -334,7 +375,12 @@ execQuad (QCall fname args outs) = do
                     Nothing -> re''
             ) re (outLocs f `zip` outs)
     put re'
-
+execQuad (Quad4 destLoc lQVal qop rQVal) = do
+    resultVal <- liftM2 qop (execQVal lQVal) (execQVal rQVal)
+    modify $ setLoc destLoc resultVal
+execQuad (Quad2 destLoc qVal) = do
+    val <- execQVal qVal
+    modify $ setLoc destLoc val
 execQuad quad = error $ "execQuad not implemented yet for " ++ show quad
 
 execQVal :: QVal -> Run Value
