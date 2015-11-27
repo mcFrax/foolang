@@ -1,7 +1,7 @@
 module Main where
 
-#ifdef USE_HASKELINE
 import Control.Monad
+#ifdef USE_HASKELINE
 import System.Console.Haskeline
 import System.FilePath
 #endif
@@ -13,11 +13,25 @@ import ErrM
 import Parfoo
 import Layoutfoo
 
-import Semantics(moduleSem, showSemError)
+import Semantics(moduleSem, showSemError, runModule)
 -- import StdLib
 
 compilationFailure :: IO a
 compilationFailure = exitWith $ ExitFailure 3
+
+interpret :: String -> String -> IO ()
+interpret code programPath = do
+    case pModule $ resolveLayout True . myLexer $ code of
+        Bad errmsg -> do
+            hPutStrLn stderr $ "Parser error:\n" ++ errmsg ++ "\n"
+            compilationFailure
+        Ok moduleSyntax -> do
+            case moduleSem moduleSyntax programPath {- stdlib -} of
+                Left errors -> do
+                    forM_ errors $ \errmsg -> do
+                        hPutStrLn stderr $ showSemError errmsg
+                    compilationFailure
+                Right sem -> runModule sem
 
 main :: IO ()
 main = do
@@ -33,16 +47,7 @@ main = do
             progName <- getProgName
             hPutStrLn stderr $ "Usage:\n    " ++ progName ++ " [FILE PATH]\n"
             compilationFailure
-    case pModule $ resolveLayout True . myLexer $ code of
-        Bad errmsg -> do
-            hPutStrLn stderr $ "Parser error:\n" ++ errmsg ++ "\n"
-            compilationFailure
-        Ok moduleSyntax -> do
-            case moduleSem moduleSyntax programPath {- stdlib -} of
-                Left errmsg -> do
-                    hPutStrLn stderr $ showSemError errmsg
-                    compilationFailure
-                Right runModule -> runModule
+    interpret code programPath
     where
 #ifdef USE_HASKELINE
         readStdin = do

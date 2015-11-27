@@ -2,8 +2,8 @@ module Semantics where
 
 -- import Control.DeepSeq
 import Control.Monad
--- import Control.Monad.Reader.Class
--- import Control.Monad.State.Class
+import Control.Monad.State
+import Control.Monad.Reader
 -- import qualified Data.List as L
 import qualified Data.Map.Strict as M
 import Data.Maybe
@@ -26,21 +26,37 @@ data Err = Err String
 showSemError :: Err -> String
 showSemError (Err s) = "ERR: " ++ s
 
-data Env = Env {
+data GlobEnv = GlobEnv {
     types :: M.Map String Type,
     functions :: M.Map String Function,
     variants :: M.Map String String,  -- variant -> type
-    vars :: M.Map String Value
+    nextTmp :: Int
+}
+
+newtype LocEnv = LocEnv {
+    vars :: M.Map String ()
+}
+
+newtype RunEnv = RLocEnv {
+    rvars :: M.Map String Value
 }
 
 data Loc = Loc String [AttrOrIdx] deriving (Eq, Ord, Show)
 
+newTmpLoc :: TCM Loc
+newTmpLoc = do
+    env <- gets semEnv
+    let n = nextTmp env
+        env' = env{nextTmp=n+1}
+    modify (\ss -> ss{semEnv=env'})
+    return $ varLoc $ "tmp#" ++ (show n)
+
 varLoc :: String -> Loc
 varLoc vname = Loc vname []
 
-setLoc :: Loc -> Value -> Env -> Env
+setLoc :: Loc -> Value -> RunEnv -> RunEnv
 setLoc (Loc vname fieldPath) newVal env = do
-    env{vars=M.alter f vname $ vars env}
+    env{rvars=M.alter f vname $ rvars env}
     where
         f mval = do
             Just $ setField fieldPath newVal $ case mval of
@@ -48,12 +64,12 @@ setLoc (Loc vname fieldPath) newVal env = do
                     -- it is actually an error only when fieldPath /= []
                 (Just oldVal) -> oldVal
 
-setLocs :: [(Loc, Value)] -> Env -> Env
+setLocs :: [(Loc, Value)] -> RunEnv -> RunEnv
 setLocs assocs env = foldl (\e (l, v) -> setLoc l v e) env assocs
 
-getLoc :: Loc -> Env -> Value
+getLoc :: Loc -> RunEnv -> Value
 getLoc (Loc vname fieldPath) env = do
-    case M.lookup vname $ vars env of
+    case M.lookup vname $ rvars env of
         Just val -> getField fieldPath val
         Nothing -> error $ "getLoc: Variable " ++ vname ++ " undefined"
 
@@ -70,12 +86,15 @@ data AttrOrIdx = Attr String | Idx Int deriving (Eq, Ord, Show)
 
 data Function = Function {
     argNames :: [String],
-    argLocs :: [Loc],
-    returns :: Bool,
-    outArgs :: [String],
-    outArgLocs :: [Loc],
-    body :: [AST.Stmt]
+    argLocs :: [QLoc],
+    outArgs :: [String],  -- may contain returnName,  if returns non-void
+    outLocs :: [QLoc],
+    body :: QuadCode,
+    isProc :: Bool
 }
+
+returnName :: String
+returnName = "#"
 
 data Type = Type
 
@@ -99,261 +118,124 @@ showVal (ValString s) = show s
 
 type BinOpF = (Value -> Value -> Value)
 
-moduleSem :: AST.Module -> String -> Either Err (IO ())
-moduleSem (AST.Mod topDefs) _fileName = do
-    let env = foldl topDefSem (Env (M.fromList [("Int", Type)]) M.empty M.empty M.empty) topDefs
-    return $ do
-        _ <- runFunction (functions env M.! "main") env [] [] Nothing
-        return ()
+type QLoc = Loc
+type QOp = BinOpF
+data QVal = QValConst Value
+          | QValVar Loc
+data Quad = Quad4 QLoc QVal QOp QVal
+          | Quad2 QLoc QVal
+          | QCall String [QVal] [QLoc]
+          | QLoop QVal QuadCode
+          | QBranch [(QVal, QuadCode)]
+          | QReturn (Maybe QVal)
+          | QAssert QVal
+          | QPrint [QVal]
+          | QInvalid  -- needed?
 
-topDefSem :: Env -> AST.TopDef -> Env
-topDefSem env (AST.FunDef (AST.Name (_, name)) AST.NoGenArgs argdefs mrettype (AST.Blk fbody)) = do
-    let (argnames, outargMaybes) = unzip $ map (\ad -> case ad of
-                AST.ValArgDef _type (AST.Name (_, argName)) -> (argName, Nothing)
-                AST.VarArgDef _type (AST.Name (_, argName)) -> (argName, Just argName)
-            ) argdefs
-        freturns = case mrettype of
-            AST.JustType _type -> True
-            AST.NoType -> False
-    env{functions=M.insert name (Function {
-            argNames=argnames,
-            argLocs=map varLoc argnames,
-            returns=freturns,
-            outArgs=catMaybes outargMaybes,
-            outArgLocs=map varLoc $ catMaybes outargMaybes,
-            body=fbody
-        }) (functions env)}
+type QuadCode = [Quad]
+
+-- newtype SSAQuadCode = SSAQuadCode QuadCode
+
+data SemState = SemState {
+    semContext :: Context,
+    semErrors :: [Err],
+    semEnv :: GlobEnv
+}
+
+type Context = [ContextLevel]
+
+type ContextLevel = String
+
+type TCM = State SemState
+
+inContext :: ContextLevel -> TCM a -> TCM a
+inContext ctx tcm = do
+    octx <- gets semContext
+    modify (\ss -> ss{semContext=ctx:octx})
+    result <- tcm
+    modify (\ss -> ss{semContext=octx})
+    return result
+
+mkCtx :: (Int, Int) -> String -> String
+mkCtx (line, col) s = (show line) ++ ":" ++ (show col) ++ ":" ++ s
+
+reportError :: String -> TCM ()
+reportError errmsg = do
+    st <- get
+    let err = Err $ (show $ semContext st) ++ ": " ++ errmsg
+    modify (\ss -> ss{semErrors=err:semErrors st})
+
+runModule :: GlobEnv -> IO ()
+runModule env = execQuad env $ QCall "main"  [] []
+
+moduleSem :: AST.Module -> String -> Either [Err] GlobEnv
+moduleSem (AST.Mod topDefs) _fileName = do
+    ss <- return $ execState (do
+                forM_ topDefs topDefSem
+                hasMain <- gets $ (M.member "main").functions.semEnv
+                when (not hasMain) $ do
+                    reportError "no main() function"
+            ) $ SemState [] [] initialEnv
+    case semErrors ss of
+        [] -> Right $ semEnv ss
+        _ -> Left $ reverse $ semErrors ss
+    where
+        initialEnv = GlobEnv (M.fromList [("Int", Type)]) M.empty M.empty 0
+
+topDefSem :: AST.TopDef -> TCM ()
+topDefSem (AST.FunDef name genArgs argdefs mrettype (AST.Blk bodyStmts)) = do
+    funDefSem False name genArgs argdefs mrettype bodyStmts
+topDefSem (AST.ProcDef name genArgs argdefs mrettype (AST.Blk bodyStmts)) = do
+    funDefSem True name genArgs argdefs mrettype bodyStmts
 -- VariantTypeDef. TopDef ::= "type" Name GenArgsDef ":" "{" [VariantDef] "}" ;
 -- SimpleTypeDef.  TopDef ::= "type" Name GenArgsDef ":" "{" [Field] "}" ;  -- just one variant
-topDefSem _ topDef = error $ "topDefSem not yet implemented for " ++ (printTree topDef)
+topDefSem topDef = reportError $ "topDefSem not yet implemented for " ++ (printTree topDef)
 
-runFunction :: Function -> Env -> [Value] -> [Maybe Loc] -> Maybe Loc -> IO Env
-runFunction f oenv args argouts mout = do
-    (ienv, mmret) <- runStmts (body f) $ setLocs (argLocs f `zip` args) $ oenv{vars=M.empty}
-    let mret = (mmret >>= id)
-    let updates = case (outArgLocs f, returns f) of
-            ([], False) -> []  -- no value returned
-            ([], True) -> do  -- value returned, but no out args
-                case (mret, mout, catMaybes argouts) of
-                    (Nothing, Nothing, []) -> []
-                    (Just _, Nothing, []) -> error "Result ignored!"
-                    (Just result, Just loc, []) -> [(loc, result)]
-                    (Just result, Nothing, [loc]) -> [(loc, result)]
-                    (Just _, _, _) -> error "Many places for one result? Fuck you!"
-                    (Nothing, _, _) -> error "No value returned althought expected"
-            ([oan], False) -> do  -- exactly one out arg in this function
-                let retval = getLoc oan ienv
-                case (mret, mout, catMaybes argouts) of
-                    (Nothing, Nothing, []) -> error "Result ignored!"
-                    (Nothing, Nothing, [loc]) -> [(loc, retval)]
-                    (Nothing, Just loc, []) -> [(loc, retval)]
-                    (Nothing, _, _) -> error "Many places for one result? Fuck you!"
-                    (Just _, _, _) -> error "Unexpected return"
-            (_oans, _) -> do
-                let retupdate = case (returns f, mret, mout) of
-                        (True, Just result, Just loc) -> [(loc, result)]
-                        (False, Nothing, Nothing) -> []
-                        (_, _, _) -> error "Screw you! That doesn't make sense!"
-                    unpack (Just oenvName, value) = Just (oenvName, value)
-                    unpack (Nothing, _) = Nothing
-                let mappedOuts = mapMaybe (\(an, ao) -> ao >> Just an) (zip (argNames f) argouts)
-                when (mappedOuts /= outArgs f) $ error $ "Args with arrows don't match with signature"
-                retupdate ++ mapMaybe unpack (argouts `zip` (map (flip getLoc ienv) $ (argLocs f)))
-    return $ setLocs updates oenv
+funDefSem :: Bool -> AST.Name -> AST.GenArgsDef -> [AST.ArgDef] -> AST.RetType -> [AST.Stmt] -> TCM ()
+funDefSem proc (AST.Name (pos, name)) genArgDefs argdefs mrettype stmts = do
+    inContext (mkCtx pos name) $ do
+        when (genArgDefs /= AST.NoGenArgs) $
+            reportError "genArgDefs /= AST.NoGenArgs not implemented yet"
+        env <- gets semEnv
+        if name `M.notMember` (functions env) then do
+            let (argnames, outargMaybes) = unzip $ map (\ad -> case ad of
+                        AST.ValArgDef _type (AST.Name (_, argName)) -> (argName, Nothing)
+                        AST.VarArgDef _type (AST.Name (_, argName)) -> (argName, Just argName)
+                    ) argdefs
+                returns = case mrettype of
+                    AST.JustType _type -> True
+                    AST.NoType -> False
+                (outargs, outlocs) = case (returns, catMaybes outargMaybes) of
+                    (False, names) -> (names, map varLoc names)
+                    (True, names) -> (returnName:names, varLoc returnName:map varLoc names)
+            when (not proc && null outargs) $ do
+                reportError "function with no output - should be proc"
+            let lenv = LocEnv $ M.fromList $ map (\an -> (an, ())) argnames
+            bodyQuads <- runReaderT (stmtsSem stmts) lenv
+            let fun = (Function {
+                argNames=argnames,
+                argLocs=map varLoc argnames,
+                outArgs=outargs,
+                outLocs=outlocs,
+                body=bodyQuads,
+                isProc=proc
+            })
+            modify (\ss -> ss{semEnv=env{functions=M.insert name fun $ functions env}})
+        else do
+            reportError $ "function redefined: " ++ name
 
-runStmts :: [AST.Stmt] -> Env -> IO (Env, Maybe (Maybe Value))
-runStmts stmts env = do
-    stmts' <- fixIfs stmts
-    foldM runStmtOrReturn (env, Nothing) stmts'
-    where
-        fixIfs :: [AST.Stmt] -> IO [AST.Stmt]
-        fixIfs [] = return []
-        fixIfs ((AST.StmtIf cond block):stmts') = do
-            let (elifs, stmts'') = takeElifs stmts'
-            stmts''' <- fixIfs stmts''
-            return $ (AST.StmtIfElse cond block elifs):stmts'''
-        fixIfs (AST.StmtElif{}:_) = error $ "Unexpected elif clause"
-        fixIfs (AST.StmtElse{}:_) = error $ "Unexpected else clause"
-        fixIfs (stmt:ss) = do
-            rest <- fixIfs ss
-            return $ stmt:rest
-        takeElifs :: [AST.Stmt] -> ([AST.ElifClause], [AST.Stmt])
-        takeElifs ((AST.StmtElif cond block):stmts') = do
-            let (elifs, stmts'') = takeElifs stmts'
-            ((AST.Elif cond block):elifs, stmts'')
-        takeElifs ((AST.StmtElse block):stmts') = do
-            ([(AST.Elif AST.ExpTrue block)], stmts')
-        takeElifs stmts' = ([], stmts')
-        runStmtOrReturn (env'', Just retval) _ = return (env'', Just retval)
-        runStmtOrReturn (env'', Nothing) stmt = runStmt stmt env''
+type LocTCM  = ReaderT LocEnv TCM
 
-runStmt :: AST.Stmt -> Env -> IO (Env, Maybe (Maybe Value))
-runStmt (AST.StmtPass) env = return (env, Nothing)
-runStmt (AST.StmtReturn) env = return (env, Just Nothing)
-runStmt (AST.StmtReturnValue expr) env = do
-    val <- runPureExpr expr env
-    return (env, Just $ Just val)
-runStmt (AST.StmtPrint exprs) env = do
-    forM_ exprs $ \expr -> do
-        val <- runPureExpr expr env
-        putStr $ showVal val ++ " "
-    putStrLn ""
-    return (env, Nothing)
-runStmt (AST.StmtAssert expr) env = do
-    val <- runPureExpr expr env
-    case val of
-         ValBool True -> return (env, Nothing)
-         ValBool False -> error $ "Assertion failed: " ++ (printTree expr)
-         _ -> error $ "Assertion condition is a bool: " ++ (printTree expr)
+stmtsSem :: [AST.Stmt] -> LocTCM QuadCode
+stmtsSem _ = do
+    lift $ reportError "stmtsSem not implemented"
+    return []
 
--- runStmt (AST.StmtLet locExp expr) env = do
---     let destLoc = expAsLoc locExp env
---     val <- runPureExpr expr env
---     return (M.insert destLoc val env, Nothing)
-runStmt (AST.StmtLAssign locExp expr) env = do
-    let destLoc = expAsLoc locExp env
-    env' <- runNonPureExpr (Just destLoc) expr env
-    return (env', Nothing)
-runStmt (AST.StmtRAssign expr locExp) env = do
-    runStmt (AST.StmtLAssign locExp expr) env
-runStmt (AST.StmtExp expr) env = do
-    env' <- runNonPureExpr Nothing expr env
-    return (env', Nothing)
-runStmt (AST.StmtIfElse cond (AST.Blk stmts) elifs) env = do
-    condVal <- runPureExpr cond env
-    if asBool condVal then
-        runStmts stmts env
-    else case elifs of
-        (AST.Elif cond' blk'):elifs' -> runStmt (AST.StmtIfElse cond' blk' elifs') env
-        [] -> return (env, Nothing)
-runStmt stmt _env = error $ "runStmt not yet implemented for " ++ (printTree stmt)
--- ###StmtLet.          Stmt ::= "let" Exp60 "=" Exp ;
--- StmtTypedLet.     Stmt ::= "let" Exp71 Name "=" Exp ;
--- ###StmtAssign.       Stmt ::= Exp "<-" Exp ;
--- ###StmtPass.         Stmt ::= "pass" ;
--- ###StmtAssert.       Stmt ::= "assert" Exp ;
--- StmtStatAssert.   Stmt ::= "static" "assert" Exp ;
--- ###StmtPrint.        Stmt ::= "!" Exp ;
--- ###StmtExp.          Stmt ::= Exp ;
--- ###StmtReturn.      Stmt ::= "return" ;
--- ###StmtReturnValue. Stmt ::= "return" Exp ;
--- StmtIf.          Stmt ::= "if" Exp Block ;
--- StmtElif.        Stmt ::= "elif" Exp Block ;
--- StmtElse.        Stmt ::= "else" Block ;
--- StmtWhile.       Stmt ::= "while" Exp  Block ;
--- StmtForIn.       Stmt ::= "for" Name "in" Exp Block ;
--- StmtForVarIn.    Stmt ::= "for" "->" Name "in" Exp Block ;
--- StmtCase.        Stmt ::= "case" [Exp] ":" "{" [CasePattern] "}";
--- internal StmtIfElse. Stmt ::= "if" Exp Block [ElifClause];
+execQuad :: GlobEnv -> Quad -> IO ()
+execQuad _ QInvalid = error "execQuad QInvalid"
+execQuad _ _ = error "execQuadCode not implemented yet"
 
-runPureExpr :: AST.Exp -> Env -> IO Value
-runPureExpr (AST.ExpArrow _) _env = error "Pure expression expected, but -> found"
-runPureExpr AST.ExpTrue _env = return $ ValBool True
-runPureExpr AST.ExpFalse _env = return $ ValBool False
-runPureExpr (AST.ExpInt i) _env = return $ ValInt $ fromInteger i
-runPureExpr (AST.ExpChar c) _env = return $ ValChar c
-runPureExpr (AST.ExpStr s) _env = return $ ValString s
-runPureExpr locExp@(AST.ExpVoT _) env = do
-    return $ getLoc (expAsLoc locExp env) env
-runPureExpr (AST.ExpAnd lexp rexp) env = runPureBinOp (wrapBoolOp (&&)) lexp rexp env
-runPureExpr (AST.ExpOr lexp rexp) env = runPureBinOp (wrapBoolOp (||)) lexp rexp env
-runPureExpr (AST.ExpCmp lexp cmpOp rexp) env = do
-    runPureBinOp (cmpOpFun cmpOp) lexp rexp env
-runPureExpr (AST.ExpAdd lexp rexp) env = runPureBinOp (wrapIntOp (+)) lexp rexp env
-runPureExpr (AST.ExpSub lexp rexp) env = runPureBinOp (wrapIntOp (-)) lexp rexp env
-runPureExpr (AST.ExpMul lexp rexp) env = runPureBinOp (wrapIntOp (*)) lexp rexp env
--- runPureExpr (AST.ExpDiv lexp rexp) env = runPureBinOp (/) lexp rexp env
-runPureExpr (AST.ExpDivInt lexp rexp) env = runPureBinOp (wrapIntOp div) lexp rexp env
-runPureExpr (AST.ExpMod lexp rexp) env = runPureBinOp (wrapIntOp mod) lexp rexp env
-runPureExpr _expr@(AST.ExpCall fexp argExps) env = do
-    function <- case fexp of
-        AST.ExpVoT [AST.Name (_, fname)] -> return $ (functions env) M.! fname
-        _ -> error $ "Not callable: " ++ (printTree fexp)
-    argVals <- forM argExps $ \expr -> do
-        runPureExpr expr env
-    let argouts = map (const Nothing) argVals
-    env' <- runFunction function env argVals argouts (Just $ varLoc "$")
-    return $ getLoc (varLoc "$") env'
-runPureExpr expr _env = error $ "runPureExpr not yet implemented for " ++ (printTree expr)
-
--- ExpAnd. Exp2 ::= Exp2 "and" Exp4 ;
---
--- ExpOr. Exp4 ::= Exp4 "or" Exp6 ;
---
--- ExpCmp. Exp6 ::= Exp6 CmpOp Exp8 ;
---
--- ExpAdd.   Exp8 ::= Exp8 "+" Exp42 ;
--- ExpSub.   Exp8 ::= Exp8 "-" Exp42 ;
---
--- ExpMul.    Exp42 ::= Exp42 "*" Exp50 ;
--- ExpDiv.    Exp42 ::= Exp42 "/" Exp50 ;
--- ExpDivInt. Exp42 ::= Exp42 "//" Exp50 ;
--- ExpMod.    Exp42 ::= Exp42 "%" Exp50 ;
---
--- ExpRange. Exp50 ::= Exp55 ".." Exp55 ;
---
--- ExpCall. Exp55 ::= Exp60 "(" [Exp] ")" ;
---
--- ExpInt.   Exp60 ::= Integer ;
--- ExpStr.   Exp60 ::= String ;
--- ExpArray. Exp60 ::= "[" [Exp] "]" ;
--- ExpTuple. Exp60 ::= "(" Exp "," [Exp] ")" ;
---
--- ExpNot.   Exp60 ::= "not" Exp60 ;
--- ExpNeg.   Exp60 ::= "-" Exp60 ;
---
--- ExpArrow.        Exp70 ::= "->" Exp71 ;
--- ExpVoT.       Exp71 ::= [Name] ; -- var or type
--- ExpSubscript. Exp71 ::= Exp71 "[" [Exp] "]" ;  -- index projection or generic instantiation
-
-runNonPureExpr :: Maybe Loc -> AST.Exp -> Env -> IO Env
-runNonPureExpr _ (AST.ExpArrow _) _env = error "Unexpected ->"
-runNonPureExpr mdest expr@(AST.ExpCall fexp args) env = do
-    function <- case fexp of
-        AST.ExpVoT [AST.Name (_, fname)] -> return $ (functions env) M.! fname
-        _ -> error $ "Not callable: " ++ (printTree fexp)
-    (argExps, argouts) <- liftM unzip $ forM args (\arg -> do
-            case arg of
-                AST.ExpArrow arg' -> return (arg', Just $ expAsLoc arg' env)
-                _ -> return (arg, Nothing)
-        )
-    when ((isNothing mdest) && (null $ catMaybes argouts)) $ error $ "Non-pure expression expected, but found pure expression " ++ (printTree expr)
-    argVals <- forM argExps $ \e -> runPureExpr e env
-    runFunction function env argVals argouts mdest
-runNonPureExpr (Just dest) expr env = do
-    val <- runPureExpr expr env
-    return $ setLoc dest val env
-runNonPureExpr Nothing expr@(AST.ExpAnd lexp rexp) env = runNonPureBinOp (wrapBoolOp (&&)) expr lexp rexp env
-runNonPureExpr Nothing expr@(AST.ExpOr lexp rexp) env = runNonPureBinOp (wrapBoolOp (||)) expr lexp rexp env
-runNonPureExpr Nothing expr@(AST.ExpCmp lexp cmpOp rexp) env = do
-    runNonPureBinOp (cmpOpFun cmpOp) expr lexp rexp env
-runNonPureExpr Nothing expr@(AST.ExpAdd lexp rexp) env = runNonPureBinOp (wrapIntOp (+)) expr lexp rexp env
-runNonPureExpr Nothing expr@(AST.ExpSub lexp rexp) env = runNonPureBinOp (wrapIntOp (-)) expr lexp rexp env
-runNonPureExpr Nothing expr@(AST.ExpMul lexp rexp) env = runNonPureBinOp (wrapIntOp (*)) expr lexp rexp env
--- runNonPureExpr Nothing expr@(AST.ExpDiv lexp rexp) env = runNonPureBinOp (/) expr lexp rexp env
-runNonPureExpr Nothing expr@(AST.ExpDivInt lexp rexp) env = runNonPureBinOp (wrapIntOp div) expr lexp rexp env
-runNonPureExpr Nothing expr@(AST.ExpMod lexp rexp) env = runNonPureBinOp (wrapIntOp mod) expr lexp rexp env
-runNonPureExpr _ expr _env = error $ "Non-pure expression expected, but found pure expression " ++ (printTree expr)
-
-
-runNonPureBinOp :: BinOpF -> AST.Exp -> AST.Exp -> AST.Exp -> Env -> IO Env
-runNonPureBinOp op wholeExpr lexp rexp env = do
-    (locExp, lexp', rexp') <- case (lexp, rexp) of
-            (AST.ExpArrow _, AST.ExpArrow _) -> error $ "Multiple arrows in " ++ (printTree wholeExpr)
-            (AST.ExpArrow lexp', _) -> return (lexp', lexp', rexp)
-            (_, AST.ExpArrow rexp') -> return (rexp', lexp, rexp')
-            _ -> error $ "runNonPureBinOp: non-pure expression expected, but no top-level arrows found " ++ (printTree wholeExpr)
-    let destLoc = expAsLoc locExp env
-    val <- runPureBinOp op lexp' rexp' env
-    return $ setLoc destLoc val env
-
-runPureBinOp :: BinOpF -> AST.Exp -> AST.Exp -> Env -> IO Value
-runPureBinOp op lexp rexp env = do
-    lval <- runPureExpr lexp env
-    rval <- runPureExpr rexp env
-    return $ lval `op` rval
-
-expAsLoc :: AST.Exp -> Env -> Loc
+expAsLoc :: AST.Exp -> LocEnv -> Loc
 expAsLoc (AST.ExpVoT [AST.Name (_, varName)]) _env = Loc varName []  -- TODO: check existence
 expAsLoc destExp _env = error $ "Not lvalue or not yet handled as lvalue: " ++ (printTree destExp)
 

@@ -67,7 +67,7 @@ StmtForVarIn.    Stmt ::= "for" "->" Name "in" Exp Block ;
 StmtBreak.       Stmt ::= "break" ;
 StmtContinue.    Stmt ::= "continue" ;
 StmtCase.        Stmt ::= "case" [Exp] ":" "{" [CasePattern] "}";
-internal StmtIfElse. Stmt ::= "if" Exp Block [ElifClause];
+internal StmtIfElse. Stmt ::= "if" Exp Block [ElifClause] Block;
 separator CasePattern ";" ;
 
 Pattern. CasePattern ::= [Exp] Block ;

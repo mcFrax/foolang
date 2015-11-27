@@ -11,7 +11,7 @@ fun swap(-> Int a, -> Int b):
     b -> a
     b <- a1
 
-fun main():
+proc main():
     a <- 0
     b <- 0
     # inc(a);  # error: result ignored
