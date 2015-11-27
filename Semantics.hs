@@ -163,12 +163,11 @@ inContext ctx tcm = do
 mkCtx :: (Int, Int) -> String -> String
 mkCtx (line, col) s = (show line) ++ ":" ++ (show col) ++ ":" ++ s
 
-reportError :: String -> TCM a
+reportError :: String -> TCM ()
 reportError errmsg = do
     st <- get
     let err = Err $ (show $ semContext st) ++ ": " ++ errmsg
     modify (\ss -> ss{semErrors=err:semErrors st})
-    return $ error "invalid [error reported]"
 
 modifyEnv :: (Env -> Env) -> TCM ()
 modifyEnv f = modify (\ss -> ss{semEnv=f $ semEnv ss})
@@ -178,6 +177,7 @@ modifyVars f = modifyEnv (\env -> env{vars=f $ vars env})
 
 runModule :: Env -> IO ()
 runModule env = do
+--     _ <- execStateT (execQuad $ QCall "main" [QValConst $ ValInt 7, QValConst $ ValInt 8, QValConst $ ValString "foo!"] []) $ RunEnv env M.empty
     _ <- execStateT (execQuad $ QCall "main" [] []) $ RunEnv env M.empty
     return ()
 
@@ -292,8 +292,9 @@ stmtSem s = do
         stmtSem' (AST.StmtPrint exprs) = do
             (exprsQuads, exprVals) <- liftM unzip $ mapM pureExprSem exprs
             return $ concat $ exprsQuads ++ [[QPrint exprVals]]
-        stmtSem' _ = do
-            reportError $ "stmtSem: Statement not yet implemented"
+        stmtSem' stmt = do
+            reportError $ "stmtSem: Statement not yet implemented: " ++ (printTree stmt)
+            return []
 
 stmtCtx :: AST.Stmt -> ContextLevel
 stmtCtx = printTree
@@ -303,8 +304,13 @@ pureExprSem e =
     inContext (exprCtx e) $ do
         pureExprSem' e
     where
+        pureExprSem' (AST.ExpTrue) = return ([], QValConst $ ValBool True)
+        pureExprSem' (AST.ExpFalse) = return ([], QValConst $ ValBool False)
         pureExprSem' (AST.ExpInt i) = return ([], QValConst $ ValInt $ fromInteger i)
         pureExprSem' (AST.ExpStr s) = return ([], QValConst $ ValString $ s)
+        pureExprSem' locExp@(AST.ExpVoT _) = do
+            loc <- expAsLoc locExp
+            return ([], QValVar loc)
         pureExprSem' (AST.ExpAnd lExp rExp) = pureBinOpSem (wrapBoolOp (&&)) lExp rExp
         pureExprSem' (AST.ExpOr lExp rExp) = pureBinOpSem (wrapBoolOp (||)) lExp rExp
         pureExprSem' (AST.ExpCmp lExp cmpOp rExp) = pureBinOpSem (cmpOpFun cmpOp) lExp rExp
@@ -314,8 +320,9 @@ pureExprSem e =
 --         pureExprSem' (AST.ExpDiv lExp rExp) = pureBinOpSem (/) lExp rExp
         pureExprSem' (AST.ExpDivInt lExp rExp) = pureBinOpSem (wrapIntOp div) lExp rExp
         pureExprSem' (AST.ExpMod lExp rExp) = pureBinOpSem (wrapIntOp mod) lExp rExp
-        pureExprSem' _ = do
-            reportError $ "stmtSem: Statement not yet implemented"
+        pureExprSem' expr = do
+            reportError $ "stmtSem: Expression not yet implemented: " ++ (printTree expr)
+            return ([], QValConst $ error $ "invalid")
 
 pureBinOpSem :: BinOpF -> AST.Exp -> AST.Exp -> TCM (QuadCode, QVal)
 pureBinOpSem op lExp rExp = do
