@@ -289,8 +289,13 @@ stmtSem s = do
 -- StmtContinue.    Stmt ::= "continue" ;
 -- StmtCase.        Stmt ::= "case" [Exp] ":" "{" [CasePattern] "}";
         stmtSem' AST.StmtPass = return []
+        stmtSem' (AST.StmtExp expr) = nonPureExprSem expr
+        stmtSem' (AST.StmtLAssign destExp valExp) = do
+            destLoc <- expAsLoc destExp
+            liftM fst $ pureExprSem (Just destLoc) valExp
+        stmtSem' (AST.StmtRAssign valExp destExp) = stmtSem' (AST.StmtLAssign destExp valExp)
         stmtSem' (AST.StmtPrint exprs) = do
-            (exprsQuads, exprVals) <- liftM unzip $ mapM pureExprSem exprs
+            (exprsQuads, exprVals) <- liftM unzip $ mapM (pureExprSem Nothing) exprs
             return $ concat $ exprsQuads ++ [[QPrint exprVals]]
         stmtSem' stmt = do
             reportError $ "stmtSem: Statement not yet implemented: " ++ (printTree stmt)
@@ -299,59 +304,87 @@ stmtSem s = do
 stmtCtx :: AST.Stmt -> ContextLevel
 stmtCtx = printTree
 
-pureExprSem :: AST.Exp -> TCM (QuadCode, QVal)
-pureExprSem e =
+pureExprSem :: Maybe Loc -> AST.Exp -> TCM (QuadCode, QVal)
+pureExprSem mLoc e =
     inContext (exprCtx e) $ do
         pureExprSem' e
     where
-        pureExprSem' (AST.ExpTrue) = return ([], QValConst $ ValBool True)
-        pureExprSem' (AST.ExpFalse) = return ([], QValConst $ ValBool False)
-        pureExprSem' (AST.ExpInt i) = return ([], QValConst $ ValInt $ fromInteger i)
-        pureExprSem' (AST.ExpStr s) = return ([], QValConst $ ValString $ s)
+        pureExprSem' (AST.ExpTrue) = literalSem mLoc $ ValBool True
+        pureExprSem' (AST.ExpFalse) = literalSem mLoc $ ValBool False
+        pureExprSem' (AST.ExpInt i) = literalSem mLoc $ ValInt $ fromInteger i
+        pureExprSem' (AST.ExpStr s) = literalSem mLoc $ ValString s
         pureExprSem' locExp@(AST.ExpVoT _) = do
             loc <- expAsLoc locExp
-            return ([], QValVar loc)
-        pureExprSem' (AST.ExpAnd lExp rExp) = pureBinOpSem (wrapBoolOp (&&)) lExp rExp
-        pureExprSem' (AST.ExpOr lExp rExp) = pureBinOpSem (wrapBoolOp (||)) lExp rExp
-        pureExprSem' (AST.ExpCmp lExp cmpOp rExp) = pureBinOpSem (cmpOpFun cmpOp) lExp rExp
-        pureExprSem' (AST.ExpAdd lExp rExp) = pureBinOpSem (wrapIntOp (+)) lExp rExp
-        pureExprSem' (AST.ExpSub lExp rExp) = pureBinOpSem (wrapIntOp (-)) lExp rExp
-        pureExprSem' (AST.ExpMul lExp rExp) = pureBinOpSem (wrapIntOp (*)) lExp rExp
---         pureExprSem' (AST.ExpDiv lExp rExp) = pureBinOpSem (/) lExp rExp
-        pureExprSem' (AST.ExpDivInt lExp rExp) = pureBinOpSem (wrapIntOp div) lExp rExp
-        pureExprSem' (AST.ExpMod lExp rExp) = pureBinOpSem (wrapIntOp mod) lExp rExp
+            case mLoc of
+                Just destLoc -> return ([Quad2 destLoc $ QValVar loc], QValVar destLoc)
+                Nothing -> return ([], QValVar loc)
+        pureExprSem' (AST.ExpAnd lExp rExp) = pureBinOpSem mLoc (wrapBoolOp (&&)) lExp rExp
+        pureExprSem' (AST.ExpOr lExp rExp) = pureBinOpSem mLoc (wrapBoolOp (||)) lExp rExp
+        pureExprSem' (AST.ExpCmp lExp cmpOp rExp) = pureBinOpSem mLoc (cmpOpFun cmpOp) lExp rExp
+        pureExprSem' (AST.ExpAdd lExp rExp) = pureBinOpSem mLoc (wrapIntOp (+)) lExp rExp
+        pureExprSem' (AST.ExpSub lExp rExp) = pureBinOpSem mLoc (wrapIntOp (-)) lExp rExp
+        pureExprSem' (AST.ExpMul lExp rExp) = pureBinOpSem mLoc (wrapIntOp (*)) lExp rExp
+--         pureExprSem' (AST.ExpDiv lExp rExp) = pureBinOpSem mLoc (/) lExp rExp
+        pureExprSem' (AST.ExpDivInt lExp rExp) = pureBinOpSem mLoc (wrapIntOp div) lExp rExp
+        pureExprSem' (AST.ExpMod lExp rExp) = pureBinOpSem mLoc (wrapIntOp mod) lExp rExp
         pureExprSem' expr = do
-            reportError $ "stmtSem: Expression not yet implemented: " ++ (printTree expr)
+            reportError $ "pureExprSem: Expression not yet implemented: " ++ (printTree expr)
             return ([], QValConst $ error $ "invalid")
 
-pureBinOpSem :: BinOpF -> AST.Exp -> AST.Exp -> TCM (QuadCode, QVal)
-pureBinOpSem op lExp rExp = do
-    (lCode, lQVal) <- pureExprSem lExp
-    (rCode, rQVal) <- pureExprSem rExp
+        literalSem Nothing val = return ([], QValConst val)
+        literalSem (Just destLoc) val = return ([Quad2 destLoc $ QValConst val], QValVar destLoc)
+
+pureBinOpSem :: Maybe Loc -> BinOpF -> AST.Exp -> AST.Exp -> TCM (QuadCode, QVal)
+pureBinOpSem mLoc op lExp rExp = do
+    (lCode, lQVal) <- pureExprSem Nothing lExp
+    (rCode, rQVal) <- pureExprSem Nothing rExp
     case (lCode, lQVal, rCode, rQVal) of
          -- TODO: special handling for div (error on 0) and possibly other ops (like overflow)
          ([], QValConst lConst, [], QValConst rConst) -> do
             return ([], QValConst $ lConst `op` rConst)
          _ -> do
-            destLoc <- newTmpLoc
+            destLoc <- case mLoc of
+                Just loc -> return loc
+                Nothing -> newTmpLoc
             return (lCode ++ rCode ++ [Quad4 destLoc lQVal op rQVal], QValVar destLoc)
 
--- runNonPureBinOp :: BinOpF -> AST.Exp -> AST.Exp -> AST.Exp -> Env -> IO Env
--- runNonPureBinOp op wholeExpr lexp rexp env = do
---     (locExp, lexp', rexp') <- case (lexp, rexp) of
---             (AST.ExpArrow _, AST.ExpArrow _) -> error $ "Multiple arrows in " ++ (printTree wholeExpr)
---             (AST.ExpArrow lexp', _) -> return (lexp', lexp', rexp)
---             (_, AST.ExpArrow rexp') -> return (rexp', lexp, rexp')
---             _ -> error $ "runNonPureBinOp: non-pure expression expected, but no top-level arrows found " ++ (printTree wholeExpr)
---     let destLoc = expAsLoc locExp env
---     val <- runPureBinOp op lexp' rexp' env
---     return $ setLoc destLoc val env
---
--- runPureBinOp :: BinOpF -> AST.Exp -> AST.Exp -> Env -> IO Value
--- runPureBinOp op lexp rexp env = do
---     lval <- runPureExpr lexp env
---     rval <- runPureExpr rexp env
---     return $ lval `op` rval
+nonPureExprSem :: AST.Exp -> TCM QuadCode
+nonPureExprSem e =
+    inContext (exprCtx e) $ do
+        nonPureExprSem' e
+    where
+        nonPureExprSem' (AST.ExpArrow _) = do
+            reportError "Unexpected ->"
+            return []
+        nonPureExprSem' (AST.ExpAnd lExp rExp) = nonPureBinOpSem (wrapBoolOp (&&)) lExp rExp
+        nonPureExprSem' (AST.ExpOr lExp rExp) = nonPureBinOpSem (wrapBoolOp (||)) lExp rExp
+        nonPureExprSem' (AST.ExpCmp lExp cmpOp rExp) = nonPureBinOpSem (cmpOpFun cmpOp) lExp rExp
+        nonPureExprSem' (AST.ExpAdd lExp rExp) = nonPureBinOpSem (wrapIntOp (+)) lExp rExp
+        nonPureExprSem' (AST.ExpSub lExp rExp) = nonPureBinOpSem (wrapIntOp (-)) lExp rExp
+        nonPureExprSem' (AST.ExpMul lExp rExp) = nonPureBinOpSem (wrapIntOp (*)) lExp rExp
+--         nonPureExprSem' (AST.ExpDiv lExp rExp) = nonPureBinOpSem (/) lExp rExp
+        nonPureExprSem' (AST.ExpDivInt lExp rExp) = nonPureBinOpSem (wrapIntOp div) lExp rExp
+        nonPureExprSem' (AST.ExpMod lExp rExp) = nonPureBinOpSem (wrapIntOp mod) lExp rExp
+        nonPureExprSem' expr = do
+            reportError $ "nonPureExprSem: Expression not yet implemented: " ++ (printTree expr)
+            return []
+
+nonPureBinOpSem :: BinOpF -> AST.Exp -> AST.Exp -> TCM QuadCode
+nonPureBinOpSem op lExp rExp = do
+    mTriple <- case (lExp, rExp) of
+            (AST.ExpArrow _, AST.ExpArrow _) -> do
+                reportError $ "Multiple arrows"
+                return Nothing
+            (AST.ExpArrow lExp', _) -> return $ Just (lExp', lExp', rExp)
+            (_, AST.ExpArrow rExp') -> return $ Just (rExp', lExp, rExp')
+            _ -> do
+                reportError $ "runNonPureBinOp: non-pure expression expected, but no top-level arrows found"
+                return Nothing
+    case mTriple of
+        Just (locExp, lExp', rExp') -> do
+            destLoc <- expAsLoc locExp
+            liftM fst $ pureBinOpSem (Just destLoc) op lExp' rExp'
+        Nothing -> return []  -- error already reported above
 
 exprCtx :: AST.Exp -> ContextLevel
 exprCtx = printTree
