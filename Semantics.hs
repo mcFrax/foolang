@@ -86,7 +86,7 @@ data Function = Function {
     argLocs :: [QLoc],
     outArgs :: [String],  -- may contain returnName,  if returns non-void
     outLocs :: [QLoc],
-    body :: QuadCode,
+    body :: QuadBlocks,
     isProc :: Bool,
     compile :: SM ()
 }
@@ -127,21 +127,26 @@ data QVal = QValConst Value
 data Quad = Quad4 QLoc QVal QOp QVal
           | Quad2 QLoc QVal
           | QCall String [QVal] [Maybe QLoc]
-          | QLoop QVal QuadCode
-          | QBranch [(QVal, QuadCode)]
-          | QReturn
           | QAssert QVal String
           | QPrint [QVal]
           deriving Show
 
+data Jump = Jump BlockName | Branch QVal BlockName BlockName | Return
+
+type BlockName = Int
+
 type QuadCode = [Quad]
 
--- newtype SSAQuadCode = SSAQuadCode QuadCode
+type QuadBlock = (QuadCode, Jump)
+
+type QuadBlocks = M.Map BlockName QuadBlock
+
 
 data SemState = SemState {
     semContext :: Context,
     semErrors :: [Err],
-    semEnv :: Env
+    semEnv :: Env,
+    semNextFreeBlockName :: BlockName
 }
 
 type Context = [ContextLevel]
@@ -151,6 +156,12 @@ type ContextLevel = String
 type SM = State SemState
 
 type Run = StateT RunEnv IO
+
+allocBlockName :: SM BlockName
+allocBlockName = do
+    n <- gets semNextFreeBlockName
+    modify (\ss -> ss{semNextFreeBlockName=n+1})
+    return n
 
 inContext :: ContextLevel -> SM a -> SM a
 inContext ctx tcm = do
@@ -189,7 +200,7 @@ moduleSem (AST.Mod topDefs) _fileName = do
                     reportError "no main() function"
                 fs <- gets $ functions . semEnv
                 forM_ (M.elems fs) compile
-            ) $ SemState [] [] initialEnv
+            ) $ SemState [] [] initialEnv 1
     case semErrors ss of
         [] -> Right $ semEnv ss
         _ -> Left $ reverse $ semErrors ss
@@ -233,8 +244,8 @@ funDefSem proc (AST.Name (pos, name)) genArgDefs argdefs mrettype stmts = do
                 isProc=proc,
                 compile=do
                     modifyVars $ const $ M.fromList $ map (\an -> (an, ())) argnames
-                    bodyQuads <- stmtsSem stmts
-                    updateFun fun{body=bodyQuads}
+                    bodyBlocks <- stmtsSem stmts 0 (BlockEnv Nothing Nothing Nothing)
+                    updateFun fun{body=bodyBlocks}
 --                     modifyVars $ const $ vars env
             })
             updateFun fun
@@ -244,10 +255,16 @@ funDefSem proc (AST.Name (pos, name)) genArgDefs argdefs mrettype stmts = do
             updateFun fun = do
                 modifyEnv (\env' -> env'{functions=M.insert name fun $ functions env'})
 
-stmtsSem :: [AST.Stmt] -> SM QuadCode
-stmtsSem stmts = do
+data BlockEnv = BlockEnv {
+    blkNext :: Maybe BlockName,
+    blkBreak :: Maybe BlockName,
+    blkContinue :: Maybe BlockName
+}
+
+stmtsSem :: [AST.Stmt] -> BlockName -> BlockEnv -> SM QuadBlocks
+stmtsSem stmts entryBlockName blkEnv = do
     stmts' <- fixIfs stmts
-    liftM concat $ mapM stmtSem stmts'
+    stmtsSem' stmts' entryBlockName []
     where
         fixIfs :: [AST.Stmt] -> SM [AST.Stmt]
         fixIfs [] = return []
@@ -258,8 +275,12 @@ stmtsSem stmts = do
                     Just elseBlk -> return elseBlk
                     Nothing -> return $ AST.Blk []
             return $ (AST.StmtIfElse cond block elifs elseBlk):stmts'''
-        fixIfs (AST.StmtElif{}:_) = error $ "Unexpected elif clause"
-        fixIfs (AST.StmtElse{}:_) = error $ "Unexpected else clause"
+        fixIfs (AST.StmtElif{}:stmts'') = do
+            reportError $ "Unexpected elif clause"
+            fixIfs stmts''  -- possible more errors to report there :)
+        fixIfs (AST.StmtElse{}:stmts'') = do
+            reportError $ "Unexpected else clause"
+            fixIfs stmts''  -- possible more errors to report there :)
         fixIfs (stmt:ss) = do
             rest <- fixIfs ss
             return $ stmt:rest
@@ -270,54 +291,89 @@ stmtsSem stmts = do
         takeElifs ((AST.StmtElse block):stmts') = do
             ([], Just block, stmts')
         takeElifs stmts' = ([], Nothing, stmts')
+        end :: BlockName -> QuadCode -> Jump -> SM QuadBlocks
+        end curBlockName curBlockCode jump = do
+            let currentBlock = (curBlockCode, jump)
+            return $ M.fromList [(curBlockName, currentBlock)]
+        stmtsSem' :: [AST.Stmt] -> BlockName -> QuadCode -> SM QuadBlocks
+        stmtsSem' [] curBlockName curBlockCode = do
+            end curBlockName curBlockCode $ case blkNext blkEnv of
+                Just nextBlockName -> Jump nextBlockName
+                Nothing -> Return
+        stmtsSem' (AST.StmtPass:stmts') curBlockName curBlockCode = do
+            stmtsSem' stmts' curBlockName curBlockCode
+        stmtsSem' [AST.StmtReturn] curBlockName curBlockCode = do
+            end curBlockName curBlockCode Return
+        stmtsSem' (AST.StmtReturn:_:_) _ _ = do
+            reportError "Dead code after return statement"
+            return M.empty
 
-stmtSem :: AST.Stmt -> SM QuadCode
-stmtSem s = do
-    inContext (stmtCtx s) $ do
-        stmtSem' s
-    where
--- StmtLAssign.     Stmt ::= Exp "<-" Exp ;
--- StmtRAssign.     Stmt ::= Exp "->" Exp ;
--- StmtPass.        Stmt ::= "pass" ;
--- StmtAssert.      Stmt ::= "assert" Exp ;
--- StmtStatAssert.  Stmt ::= "static" "assert" Exp ;
--- StmtPrint.       Stmt ::= "!" [Exp] ;
--- StmtExp.         Stmt ::= Exp ;
--- StmtReturn.      Stmt ::= "return" ;
--- StmtReturnValue. Stmt ::= "return" Exp ;
--- StmtIf.          Stmt ::= "if" Exp Block ;
--- StmtElif.        Stmt ::= "elif" Exp Block ;
--- StmtElse.        Stmt ::= "else" Block ;
--- StmtWhile.       Stmt ::= "while" Exp  Block ;
--- StmtForIn.       Stmt ::= "for" Name "in" Exp Block ;
--- StmtForVarIn.    Stmt ::= "for" "->" Name "in" Exp Block ;
--- StmtBreak.       Stmt ::= "break" ;
--- StmtContinue.    Stmt ::= "continue" ;
--- StmtCase.        Stmt ::= "case" [Exp] ":" "{" [CasePattern] "}";
-        stmtSem' AST.StmtPass = return []
-        stmtSem' (AST.StmtExp expr) = nonPureExprSem expr
-        stmtSem' (AST.StmtLAssign destExp call@(AST.ExpCall{})) = do
+        stmtsSem' [AST.StmtBreak] curBlockName curBlockCode = do
+            case blkBreak blkEnv of
+                 Just blockName -> end curBlockName curBlockCode (Jump blockName)
+                 Nothing -> do
+                    reportError $ "Illegal break statement"
+                    return M.empty
+        stmtsSem' (AST.StmtBreak:_:_) _ _ = do
+            reportError "Dead code after break statement"
+            return M.empty
+
+        stmtsSem' [AST.StmtContinue] curBlockName curBlockCode = do
+            case blkContinue blkEnv of
+                 Just blockName -> end curBlockName curBlockCode (Jump blockName)
+                 Nothing -> do
+                    reportError $ "Illegal continue statement"
+                    return M.empty
+        stmtsSem' (AST.StmtContinue:_:_) _ _ = do
+            reportError "Dead code after continue statement"
+            return M.empty
+
+        stmtsSem' (stmt@(AST.StmtIfElse {}):_) _ _ = do
+            reportError $ "Statement not yet implemented: " ++ printTree stmt
+            return M.empty
+        stmtsSem' (stmt@(AST.StmtWhile {}):_) _ _ = do
+            reportError $ "Statement not yet implemented: " ++ printTree stmt
+            return M.empty
+        stmtsSem' (stmt@(AST.StmtForIn {}):_) _ _ = do
+            reportError $ "Statement not yet implemented: " ++ printTree stmt
+            return M.empty
+        stmtsSem' (stmt@(AST.StmtForVarIn {}):_) _ _ = do
+            reportError $ "Statement not yet implemented: " ++ printTree stmt
+            return M.empty
+        stmtsSem' (stmt@(AST.StmtCase {}):_) _ _ = do
+            reportError $ "Statement not yet implemented: " ++ printTree stmt
+            return M.empty
+        stmtsSem' [AST.StmtReturnValue valExp] curBlockName curBlockCode = do
+            (exprQuads, _) <- pureExprSem (Just $ varLoc returnName) valExp
+            end curBlockName (curBlockCode ++ exprQuads) Return
+        stmtsSem' (AST.StmtReturnValue{}:_:_) _ _ = do
+            reportError "Dead code after return statement"
+            return M.empty
+        stmtsSem' (noJumpStmt:stmts') curBlockName curBlockCode = do
+            stmtCode <- inContext (stmtCtx noJumpStmt) $ stmtSem noJumpStmt
+            stmtsSem' stmts' curBlockName (curBlockCode ++ stmtCode)
+
+        stmtSem :: AST.Stmt -> SM QuadCode
+        stmtSem (AST.StmtExp expr) = nonPureExprSem expr
+        stmtSem (AST.StmtLAssign destExp call@(AST.ExpCall{})) = do
             mDestLoc <- case destExp of
                 (AST.ExpVoT [AST.Name (_, "_")]) -> return Nothing
                 _ -> liftM Just $ expAsLoc destExp
             callSem call (Just (mDestLoc, True))
-        stmtSem' (AST.StmtLAssign destExp valExp) = do
+        stmtSem (AST.StmtLAssign destExp valExp) = do
             destLoc <- expAsLoc destExp
             liftM fst $ pureExprSem (Just destLoc) valExp
-        stmtSem' (AST.StmtRAssign valExp destExp) = stmtSem' (AST.StmtLAssign destExp valExp)
-        stmtSem' (AST.StmtPrint exprs) = do
+        stmtSem (AST.StmtRAssign valExp destExp) = stmtSem (AST.StmtLAssign destExp valExp)
+        stmtSem (AST.StmtPrint exprs) = do
             (exprsQuads, exprVals) <- liftM unzip $ mapM (pureExprSem Nothing) exprs
             return $ concat $ exprsQuads ++ [[QPrint exprVals]]
-        stmtSem' (AST.StmtReturnValue valExp) = do
-            (exprQuads, _) <- pureExprSem (Just $ varLoc returnName) valExp
-            return $ exprQuads ++ [QReturn]
-        stmtSem' (AST.StmtAssert valExp) = do
+        stmtSem (AST.StmtAssert valExp) = do
             (exprQuads, exprVal) <- pureExprSem Nothing valExp
             return $ exprQuads ++ [QAssert exprVal (printTree valExp)]
-        stmtSem' AST.StmtReturn = return [QReturn]
-        stmtSem' stmt = do
+        stmtSem stmt = do
             reportError $ "stmtSem: Statement not yet implemented: " ++ (printTree stmt)
             return []
+
 
 stmtCtx :: AST.Stmt -> ContextLevel
 stmtCtx = printTree
@@ -460,52 +516,52 @@ callSem notACall _ = do
 exprCtx :: AST.Exp -> ContextLevel
 exprCtx = printTree
 
-execQuad :: Quad -> Run Bool
-execQuad QReturn = return True
-execQuad quad = do
-        execQuad' quad
-        return False
-    where
-    execQuad' (QPrint qvals) = do
-        forM_ qvals $ \qval -> do
-            s <- liftM ((++ " ") . showVal) $ execQVal qval
-            liftIO $ putStr s
-        liftIO $ putStrLn ""
-    execQuad' (QAssert qval message) = do
-        val <- execQVal qval
-        case val of
-             ValBool True -> return ()
-             ValBool False -> error $ "Assertion failed: " ++ message
-             _ -> error $ "Assertion value is not a bool: " ++ show val
-    execQuad' (QCall fname args outs) = do
-        re <- get
-        let f = (functions $ staticEnv re) M.! fname
-        argVals <- mapM execQVal args
-        let argVars = M.fromList $ argNames f `zip` argVals
-        put re{varVals=argVars}
-        foldM_ (\returned q -> do
-                if returned then do
-                    return True
-                else do
-                    liftIO $ print q
-                    execQuad q
-            ) False (body f)
-        inEnv <- get
-        let re' = foldl (\re'' (inLoc, outMLoc) -> do
-                    case outMLoc of
-                        Just outLoc -> do
-                            let val = getLoc inLoc inEnv
-                            setLoc outLoc val re''
-                        Nothing -> re''
-                ) re (outLocs f `zip` outs)
-        put re'
-    execQuad' (Quad4 destLoc lQVal qop rQVal) = do
-        resultVal <- liftM2 qop (execQVal lQVal) (execQVal rQVal)
-        modify $ setLoc destLoc resultVal
-    execQuad' (Quad2 destLoc qVal) = do
-        val <- execQVal qVal
-        modify $ setLoc destLoc val
-    execQuad' _ = error $ "execQuad not implemented yet for " ++ show quad
+execQuadBlock :: QuadBlocks -> BlockName -> Run ()
+execQuadBlock quadBlocks entryBlockName = do
+    let (code, jump) = quadBlocks M.! entryBlockName
+    forM_ code execQuad
+    case jump of
+        Return -> return ()
+        Jump blockName -> execQuadBlock quadBlocks blockName
+        Branch qVal lBranchName rBranchName -> do
+            ValBool cond <- execQVal qVal
+            execQuadBlock quadBlocks $ if cond then lBranchName
+                                               else rBranchName
+
+execQuad :: Quad -> Run ()
+execQuad (QPrint qvals) = do
+    forM_ qvals $ \qval -> do
+        s <- liftM ((++ " ") . showVal) $ execQVal qval
+        liftIO $ putStr s
+    liftIO $ putStrLn ""
+execQuad (QAssert qval message) = do
+    val <- execQVal qval
+    case val of
+            ValBool True -> return ()
+            ValBool False -> error $ "Assertion failed: " ++ message
+            _ -> error $ "Assertion value is not a bool: " ++ show val
+execQuad (QCall fname args outs) = do
+    re <- get
+    let f = (functions $ staticEnv re) M.! fname
+    argVals <- mapM execQVal args
+    let argVars = M.fromList $ argNames f `zip` argVals
+    put re{varVals=argVars}
+    execQuadBlock (body f) 0
+    inEnv <- get
+    let re' = foldl (\re'' (inLoc, outMLoc) -> do
+                case outMLoc of
+                    Just outLoc -> do
+                        let val = getLoc inLoc inEnv
+                        setLoc outLoc val re''
+                    Nothing -> re''
+            ) re (outLocs f `zip` outs)
+    put re'
+execQuad (Quad4 destLoc lQVal qop rQVal) = do
+    resultVal <- liftM2 qop (execQVal lQVal) (execQVal rQVal)
+    modify $ setLoc destLoc resultVal
+execQuad (Quad2 destLoc qVal) = do
+    val <- execQVal qVal
+    modify $ setLoc destLoc val
 
 execQVal :: QVal -> Run Value
 execQVal (QValConst val) = return val
