@@ -426,17 +426,20 @@ callSem (AST.ExpCall (AST.ExpVoT [AST.Name (_pos, fName)]) argExps) outsInfo = d
                 (destArgs, destMLocs) = unzip $ catMaybes mDestMLocs
                 destArgs' = (maybeToList (outsInfo >> return returnName)) ++ destArgs
             -- reports errors, if any; reporting does not affect returned code
+            let retOuts = map fst $ maybeToList outsInfo
+                destMLocs' = retOuts ++ destMLocs
             case (outsInfo, destArgs, outArgs f) of
-                (Just _, [], [_]) -> return ()
-                (Nothing, [_], [_]) -> return ()
                 (Just (_, False), _:_, _) -> do
                     reportError $ "callSem: Pure expression expected, but arrow found"
                 (Nothing, [], []) -> when (not $ isProc f) $ do
                     reportError $ "callSem: Function result ignored"
-                _ -> when (destArgs' /= outArgs f) $ do
-                    reportError $ "callSem: Signature mismatch"
-            let retOuts = map fst $ maybeToList outsInfo
-            return $ argsCode ++ [QCall fName argQVals $ retOuts ++ destMLocs]
+                _ -> do
+                    when (length destArgs' /= 1 && (length $ outArgs f) /= 1 &&
+                            destArgs' /= outArgs f) $ do
+                        reportError $ "callSem: Signature mismatch"
+                    when ((all isNothing destMLocs') && (not $ isProc f)) $ do
+                        reportError $ "callSem: Function result ignored"
+            return $ argsCode ++ [QCall fName argQVals destMLocs']
         Nothing -> do
             reportError $ "Function undefined: " ++ fName
             return []
