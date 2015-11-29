@@ -331,17 +331,26 @@ stmtsSem stmts entryBlockName blkEnv = do
 --         stmtsSem' ((AST.StmtIfElse condExp (AST.Blk thenStmts) [] (AST.Blk [])):stmt') curBlockName curBlockCode = do
             -- TODO: optimize empty elifs and else block
         stmtsSem' ((AST.StmtIfElse condExp (AST.Blk thenStmts) elifs elseBlock@(AST.Blk elseStmts)):stmt') curBlockName curBlockCode = do
-            afterBlockName <- allocBlockName
+            mAfterBlockName <- do
+                if not $ null stmt' then do
+                    liftM Just $ allocBlockName
+                else do
+                    return $ blkNext blkEnv
             lBranch <- allocBlockName
             rBranch <- allocBlockName
             (condCode, condQVal) <- pureExprSem Nothing condExp
             previousBlocks <- end curBlockName (curBlockCode ++ condCode) (Branch condQVal lBranch rBranch)
-            lBranchBlocks <- stmtsSem' thenStmts lBranch []
+            let innerBlkEnv = blkEnv{blkNext=mAfterBlockName}
+            lBranchBlocks <- stmtsSem thenStmts lBranch innerBlkEnv
             rBranchBlocks <- case elifs of
-                [] -> stmtsSem' elseStmts rBranch []
+                [] -> stmtsSem elseStmts rBranch innerBlkEnv
                 (AST.Elif elifCond elifThen):elifs' -> do
-                    stmtsSem' [AST.StmtIfElse elifCond elifThen elifs' elseBlock] rBranch []
-            followingBlocks <- stmtsSem' stmt' afterBlockName []
+                    stmtsSem [AST.StmtIfElse elifCond elifThen elifs' elseBlock] rBranch innerBlkEnv
+            followingBlocks <- do
+                if not $ null stmt' then do
+                    stmtsSem' stmt' (fromJust mAfterBlockName) []
+                else do
+                    return M.empty
             return $ M.unions [previousBlocks, lBranchBlocks, rBranchBlocks, followingBlocks]
         stmtsSem' (stmt@(AST.StmtWhile {}):_) _ _ = do
             reportError $ "Statement not yet implemented: " ++ printTree stmt

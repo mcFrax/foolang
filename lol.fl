@@ -35,6 +35,7 @@ proc main():
     #! "factorial1"
     #! factorial1(0), factorial1(1), factorial1(2), factorial1(3), factorial1(4), factorial1(5)
     ! "pow(2, 2) =", pow(2, 2), "  pow(2, 3) =", pow(2, 3)
+    testIfs()
 
 fun pow(-> Int n, Int p):
     if p < 1:
@@ -53,3 +54,20 @@ fun factorial(Int n) -> Int:
 #    for i in 2..n:
 #        -> result * i
 #    return result
+
+proc testIfs():
+    testIfs'(0)
+    testIfs'(1)
+    testIfs'(2)
+    testIfs'(3)
+
+proc testIfs'(Int b):
+    if b =< 0:
+        ! "branch 0"
+    elif b == 1:
+        ! "branch 1"
+    elif b == 2:
+        ! "branch 2"
+    else:
+        ! "branch 3"
+    ! "after if"
