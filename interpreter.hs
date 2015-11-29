@@ -13,7 +13,9 @@ import ErrM
 import Parfoo
 import Layoutfoo
 
-import Semantics(moduleSem, showSemError, runModule)
+import Semantics(moduleSem)
+import QuadExecution(runModule)
+import Types(showSemError)
 -- import StdLib
 
 compilationFailure :: IO a
