@@ -130,7 +130,7 @@ data Quad = Quad4 QLoc QVal QOp QVal
           | QLoop QVal QuadCode
           | QBranch [(QVal, QuadCode)]
           | QReturn
-          | QAssert QVal
+          | QAssert QVal String
           | QPrint [QVal]
           deriving Show
 
@@ -311,6 +311,9 @@ stmtSem s = do
         stmtSem' (AST.StmtReturnValue valExp) = do
             (exprQuads, _) <- pureExprSem (Just $ varLoc returnName) valExp
             return $ exprQuads ++ [QReturn]
+        stmtSem' (AST.StmtAssert valExp) = do
+            (exprQuads, exprVal) <- pureExprSem Nothing valExp
+            return $ exprQuads ++ [QAssert exprVal (printTree valExp)]
         stmtSem' AST.StmtReturn = return [QReturn]
         stmtSem' stmt = do
             reportError $ "stmtSem: Statement not yet implemented: " ++ (printTree stmt)
@@ -465,6 +468,12 @@ execQuad quad = do
             s <- liftM ((++ " ") . showVal) $ execQVal qval
             liftIO $ putStr s
         liftIO $ putStrLn ""
+    execQuad' (QAssert qval message) = do
+        val <- execQVal qval
+        case val of
+             ValBool True -> return ()
+             ValBool False -> error $ "Assertion failed: " ++ message
+             _ -> error $ "Assertion value is not a bool: " ++ show val
     execQuad' (QCall fname args outs) = do
         re <- get
         let f = (functions $ staticEnv re) M.! fname

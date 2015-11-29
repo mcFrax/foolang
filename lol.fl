@@ -30,11 +30,11 @@ proc main():
     ! a, b, c
     swap(->a, ->b)
     ! a, b, c
-    ! "factorial"
-    ! factorial(0), factorial(1), factorial(2), factorial(3), factorial(4), factorial(5)
+#    ! "factorial"
+#    ! factorial(0), factorial(1), factorial(2), factorial(3), factorial(4), factorial(5)
     #! "factorial1"
     #! factorial1(0), factorial1(1), factorial1(2), factorial1(3), factorial1(4), factorial1(5)
-    ! "pow(2, 2) =", pow(2, 2), "  pow(2, 3) =", pow(2, 3)
+#    ! "pow(2, 2) =", pow(2, 2), "  pow(2, 3) =", pow(2, 3)
 
 #fun pow(-> Int n, Int p):
 #    if p < 1:
