@@ -516,17 +516,29 @@ callSem notACall _ = do
 exprCtx :: AST.Exp -> ContextLevel
 exprCtx = printTree
 
+logQuad :: String -> Run ()
+logQuad = const $ return ()
+-- logQuad = liftIO . putStrLn
+
 execQuadBlock :: QuadBlocks -> BlockName -> Run ()
 execQuadBlock quadBlocks entryBlockName = do
     let (code, jump) = quadBlocks M.! entryBlockName
-    forM_ code execQuad
+    forM_ code $ \quad -> do
+        logQuad $ show quad
+        execQuad quad
     case jump of
-        Return -> return ()
-        Jump blockName -> execQuadBlock quadBlocks blockName
+        Return -> do
+            logQuad $ "Return"
+            return ()
+        Jump blockName -> do
+            logQuad $ "Jump: " ++ show blockName
+            execQuadBlock quadBlocks blockName
         Branch qVal lBranchName rBranchName -> do
             ValBool cond <- execQVal qVal
-            execQuadBlock quadBlocks $ if cond then lBranchName
-                                               else rBranchName
+            let blockName = if cond then lBranchName
+                                    else rBranchName
+            logQuad $ "Branch: " ++ show blockName
+            execQuadBlock quadBlocks blockName
 
 execQuad :: Quad -> Run ()
 execQuad (QPrint qvals) = do
