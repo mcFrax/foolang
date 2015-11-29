@@ -34,8 +34,11 @@ proc main():
     ! factorial(0), factorial(1), factorial(2), factorial(3), factorial(4), factorial(5)
     #! "factorial1"
     #! factorial1(0), factorial1(1), factorial1(2), factorial1(3), factorial1(4), factorial1(5)
+    ! "factorial2"
+    ! factorial2(0), factorial2(1), factorial2(2), factorial2(3), factorial2(4), factorial2(5)
     ! "pow(2, 2) =", pow(2, 2), "  pow(2, 3) =", pow(2, 3)
     testIfs()
+    testWhile()
 
 fun pow(-> Int n, Int p):
     if p < 1:
@@ -55,6 +58,13 @@ fun factorial(Int n) -> Int:
 #        -> result * i
 #    return result
 
+fun factorial2(Int n) -> Int:
+    result <- 1
+    while n > 1:
+        -> result * n
+        -> n - 1
+    return result
+
 proc testIfs():
     testIfs'(0)
     testIfs'(1)
@@ -71,3 +81,18 @@ proc testIfs'(Int b):
     else:
         ! "branch 3"
     ! "after if"
+
+proc testWhile():
+    ! "testing while"
+    i <- 0
+    while True:
+        -> i + 1
+        if i % 2 == 1:
+            continue
+        if i > 6:
+            while True:
+                break
+        if i > 10:
+            break
+        ! i
+

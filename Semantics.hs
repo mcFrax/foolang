@@ -209,9 +209,30 @@ stmtsSem stmts entryBlockName blkEnv = do
                 else do
                     return M.empty
             return $ M.unions [previousBlocks, lBranchBlocks, rBranchBlocks, followingBlocks]
-        stmtsSem' (stmt@(AST.StmtWhile {}):_) _ _ = do
-            reportError $ "Statement not yet implemented: " ++ printTree stmt
-            return M.empty
+        stmtsSem' ((AST.StmtWhile condExp (AST.Blk bodyStmts)):stmt') curBlockName curBlockCode = do
+            let produceAfterBlock = (not $ null stmt') || (isNothing $ blkNext blkEnv)
+            afterBlockName <- do
+                if produceAfterBlock  then do
+                    allocBlockName
+                else do
+                    return $ fromJust $ blkNext blkEnv
+            condBlock <- allocBlockName
+            bodyBlock <- allocBlockName
+            previousBlocks <- end curBlockName curBlockCode (Jump condBlock)
+            (condCode, condQVal) <- pureExprSem Nothing condExp
+            let condBlocks = M.fromList [(condBlock, (condCode, Branch condQVal bodyBlock afterBlockName))]
+            let innerBlkEnv = BlockEnv {
+                blkNext=Just condBlock,
+                blkBreak=Just afterBlockName,
+                blkContinue=Just bodyBlock
+            }
+            bodyBlocks <- stmtsSem bodyStmts bodyBlock innerBlkEnv
+            followingBlocks <- do
+                if produceAfterBlock  then do
+                    stmtsSem' stmt' afterBlockName []
+                else do
+                    return M.empty
+            return $ M.unions [previousBlocks, condBlocks, bodyBlocks, followingBlocks]
         stmtsSem' (stmt@(AST.StmtForIn {}):_) _ _ = do
             reportError $ "Statement not yet implemented: " ++ printTree stmt
             return M.empty
