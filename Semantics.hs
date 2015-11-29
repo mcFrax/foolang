@@ -111,6 +111,11 @@ showVal (ValChar c) = show c
 showVal (ValString s) = show s
 -- ...
 
+isZero :: Value -> Bool
+isZero (ValInt 0) = True
+-- isZero (ValFloat 0.0) = True
+isZero _ = False
+
 -- type AArray = M.Map Int Value
 -- type Object = M.Map String Value
 
@@ -195,9 +200,15 @@ moduleSem :: AST.Module -> String -> Either [Err] Env
 moduleSem (AST.Mod topDefs) _fileName = do
     ss <- return $ execState (do
                 forM_ topDefs topDefSem
-                hasMain <- gets $ (M.member "main").functions.semEnv
-                when (not hasMain) $ do
-                    reportError "no main() function"
+                mMain <- gets $ (M.lookup "main").functions.semEnv
+                case mMain of
+                    Just main -> do
+                        when (argNames main /= []) $ do
+                            reportError $ "invalid main() signature (main should not take any arguments)"
+                        when (outArgs main /= []) $ do
+                            reportError $ "invalid main() signature (main should not return anything)"
+                    Nothing -> do
+                        reportError "no main() procedure"
                 fs <- gets $ functions . semEnv
                 forM_ (M.elems fs) compile
             ) $ SemState [] [] initialEnv 1
@@ -242,7 +253,7 @@ funDefSem proc (AST.Name (pos, name)) genArgDefs argdefs mrettype stmts = do
                 outLocs=outlocs,
                 body=undefined,
                 isProc=proc,
-                compile=do
+                compile=inContext (mkCtx pos name) $ do
                     modifyVars $ const $ M.fromList $ map (\an -> (an, ())) argnames
                     bodyBlocks <- stmtsSem stmts 0 (BlockEnv Nothing Nothing Nothing)
                     updateFun fun{body=bodyBlocks}
@@ -422,8 +433,8 @@ pureExprSem mLoc e =
         pureExprSem' (AST.ExpAdd lExp rExp) = pureBinOpSem mLoc (wrapIntOp (+)) lExp rExp
         pureExprSem' (AST.ExpSub lExp rExp) = pureBinOpSem mLoc (wrapIntOp (-)) lExp rExp
         pureExprSem' (AST.ExpMul lExp rExp) = pureBinOpSem mLoc (wrapIntOp (*)) lExp rExp
---         pureExprSem' (AST.ExpDiv lExp rExp) = pureBinOpSem mLoc (/) lExp rExp
-        pureExprSem' (AST.ExpDivInt lExp rExp) = pureBinOpSem mLoc (wrapIntOp div) lExp rExp
+--         pureExprSem' (AST.ExpDiv lExp rExp) = pureBinOpSem' True mLoc (/) lExp rExp
+        pureExprSem' (AST.ExpDivInt lExp rExp) = pureBinOpSem' True mLoc (wrapIntOp div) lExp rExp
         pureExprSem' (AST.ExpMod lExp rExp) = pureBinOpSem mLoc (wrapIntOp mod) lExp rExp
         pureExprSem' call@(AST.ExpCall{}) = do
             destLoc <- case mLoc of
@@ -439,14 +450,21 @@ pureExprSem mLoc e =
         literalSem (Just destLoc) val = return ([Quad2 destLoc $ QValConst val], QValVar destLoc)
 
 pureBinOpSem :: Maybe Loc -> BinOpF -> AST.Exp -> AST.Exp -> SM (QuadCode, QVal)
-pureBinOpSem mLoc op lExp rExp = do
+pureBinOpSem = pureBinOpSem' False
+
+pureBinOpSem' :: Bool -> Maybe Loc -> BinOpF -> AST.Exp -> AST.Exp -> SM (QuadCode, QVal)
+pureBinOpSem' isDivision mLoc op lExp rExp = do
     (lCode, lQVal) <- pureExprSem Nothing lExp
     (rCode, rQVal) <- pureExprSem Nothing rExp
+    case rQVal of
+        QValConst rConst -> do
+            when (isDivision && isZero rConst) $ do
+                reportError $ "Division by 0"
+        _ -> return ()
     case (lCode, lQVal, rCode, rQVal) of
-         -- TODO: special handling for div (error on 0) and possibly other ops (like overflow)
-         ([], QValConst lConst, [], QValConst rConst) -> do
+        ([], QValConst lConst, [], QValConst rConst) -> do
             return ([], QValConst $ lConst `op` rConst)
-         _ -> do
+        _ -> do
             destLoc <- case mLoc of
                 Just loc -> return loc
                 Nothing -> newTmpLoc
@@ -466,8 +484,8 @@ nonPureExprSem e =
         nonPureExprSem' (AST.ExpAdd lExp rExp) = nonPureBinOpSem (wrapIntOp (+)) lExp rExp
         nonPureExprSem' (AST.ExpSub lExp rExp) = nonPureBinOpSem (wrapIntOp (-)) lExp rExp
         nonPureExprSem' (AST.ExpMul lExp rExp) = nonPureBinOpSem (wrapIntOp (*)) lExp rExp
---         nonPureExprSem' (AST.ExpDiv lExp rExp) = nonPureBinOpSem (/) lExp rExp
-        nonPureExprSem' (AST.ExpDivInt lExp rExp) = nonPureBinOpSem (wrapIntOp div) lExp rExp
+--         nonPureExprSem' (AST.ExpDiv lExp rExp) = nonPureBinOpSem' True (/) lExp rExp
+        nonPureExprSem' (AST.ExpDivInt lExp rExp) = nonPureBinOpSem' True (wrapIntOp div) lExp rExp
         nonPureExprSem' (AST.ExpMod lExp rExp) = nonPureBinOpSem (wrapIntOp mod) lExp rExp
         nonPureExprSem' call@(AST.ExpCall{}) = do
             callSem call Nothing
@@ -476,7 +494,10 @@ nonPureExprSem e =
             return []
 
 nonPureBinOpSem :: BinOpF -> AST.Exp -> AST.Exp -> SM QuadCode
-nonPureBinOpSem op lExp rExp = do
+nonPureBinOpSem = nonPureBinOpSem' False
+
+nonPureBinOpSem' :: Bool -> BinOpF -> AST.Exp -> AST.Exp -> SM QuadCode
+nonPureBinOpSem' isDivision op lExp rExp = do
     mTriple <- case (lExp, rExp) of
             (AST.ExpArrow _, AST.ExpArrow _) -> do
                 reportError $ "Multiple arrows"
@@ -489,7 +510,7 @@ nonPureBinOpSem op lExp rExp = do
     case mTriple of
         Just (locExp, lExp', rExp') -> do
             destLoc <- expAsLoc locExp
-            liftM fst $ pureBinOpSem (Just destLoc) op lExp' rExp'
+            liftM fst $ pureBinOpSem' isDivision (Just destLoc) op lExp' rExp'
         Nothing -> return []  -- error already reported above
 
 callSem :: AST.Exp -> Maybe (Maybe Loc, Bool) -> SM QuadCode
