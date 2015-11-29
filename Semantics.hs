@@ -513,9 +513,15 @@ callSem (AST.ExpCall (AST.ExpVoT [AST.Name (_pos, fName)]) argExps) outsInfo = d
                 _ -> do
                     when (length destArgs' /= 1 && (length $ outArgs f) /= 1 &&
                             destArgs' /= outArgs f) $ do
-                        reportError $ "callSem: Signature mismatch"
+                        reportError $ "callSem: Signature mismatch: bad arrows"
                     when ((all isNothing destMLocs') && (not $ isProc f)) $ do
                         reportError $ "callSem: Function result ignored"
+            let argsProvided = length argQVals
+                argsExpected = length (argNames f)
+            when (argsProvided /= argsExpected) $ do
+                reportError $ "Bad number of arguments for function `" ++ fName ++
+                    "' (" ++ show argsExpected ++ " expected, " ++
+                    show argsProvided ++ " found)"
             return $ argsCode ++ [QCall fName argQVals destMLocs']
         Nothing -> do
             reportError $ "Function undefined: " ++ fName
