@@ -72,7 +72,7 @@ proc testIfs():
     testIfs'(3)
 
 proc testIfs'(Int b):
-    if b =< 0:
+    if b <= 0:
         ! "branch 0"
     elif b == 1:
         ! "branch 1"

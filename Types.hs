@@ -26,51 +26,10 @@ data Env = Env {
 
 type Vars = M.Map String ()
 
-data RunEnv = RunEnv {
-    staticEnv :: Env,
-    varVals :: M.Map String Value
-}
-
 data Loc = Loc String [AttrOrIdx] deriving (Eq, Ord, Show)
-
-newTmpLoc :: SM Loc
-newTmpLoc = do
-    env <- gets semEnv
-    let n = nextTmp env
-        env' = env{nextTmp=n+1}
-    modify (\ss -> ss{semEnv=env'})
-    return $ varLoc $ "tmp." ++ (show n)
 
 varLoc :: String -> Loc
 varLoc vname = Loc vname []
-
-setLoc :: Loc -> Value -> RunEnv -> RunEnv
-setLoc (Loc vname fieldPath) newVal env = do
-    env{varVals=M.alter f vname $ varVals env}
-    where
-        f mval = do
-            Just $ setField fieldPath newVal $ case mval of
-                Nothing -> error $ "setLoc: Variable " ++ vname ++ " undefined"
-                    -- it is actually an error only when fieldPath /= []
-                (Just oldVal) -> oldVal
-
-setLocs :: [(Loc, Value)] -> RunEnv -> RunEnv
-setLocs assocs env = foldl (\e (l, v) -> setLoc l v e) env assocs
-
-getLoc :: Loc -> RunEnv -> Value
-getLoc (Loc vname fieldPath) env = do
-    case M.lookup vname $ varVals env of
-        Just val -> getField fieldPath val
-        Nothing -> error $ "getLoc: Variable " ++ vname ++ " undefined"
-
-setField :: [AttrOrIdx] -> Value -> Value -> Value
-setField [] newVal _oldVal = newVal
-setField _ _newVal _oldVal = error $ "setField not yet implemented for nonempty path"
--- setField (Idx idx:fieldPath') newVal oldVal = oldVal
-
-getField :: [AttrOrIdx] -> Value -> Value
-getField [] val = val
-getField _ _val = error $ "getField not yet implemented for nonempty path"
 
 data AttrOrIdx = Attr String | Idx Int deriving (Eq, Ord, Show)
 
@@ -90,6 +49,7 @@ returnName = "."
 data Type = Type
 
 data Value = ValInt {asInt :: Int}
+           | ValDouble Double
            | ValString {asString :: String}
            | ValBool {asBool :: Bool}
            | ValChar {asChar :: Char}
@@ -97,8 +57,14 @@ data Value = ValInt {asInt :: Int}
 --            | ValObject {asObject :: Object}
     deriving (Eq, Show)
 
+asDouble :: Value -> Double
+asDouble (ValDouble v) = v
+asDouble (ValInt v) = fromIntegral $ v
+asDouble v = error $ "asDouble " ++ showVal v
+
 showVal :: Value -> String
 showVal (ValInt i) = show i
+showVal (ValDouble f) = show f
 showVal (ValBool b) = show b
 showVal (ValChar c) = show c
 showVal (ValString s) = show s
@@ -106,7 +72,7 @@ showVal (ValString s) = show s
 
 isZero :: Value -> Bool
 isZero (ValInt 0) = True
--- isZero (ValFloat 0.0) = True
+isZero (ValDouble 0.0) = True
 isZero _ = False
 
 -- type AArray = M.Map Int Value
@@ -114,11 +80,10 @@ isZero _ = False
 
 type BinOpF = (Value -> Value -> Value)
 
-instance Show (Value -> Value -> Value) where
-    show _ = "<BinOpF>"
-
 type QLoc = Loc
-type QOp = BinOpF
+data QOp = QAnd | QOr | QAdd | QSub | QMul | QDiv | QDivInt | QMod
+         | QCmpEq | QCmpNe | QCmpLt | QCmpGt | QCmpLe | QCmpGe
+            deriving (Show, Eq)
 data QVal = QValConst Value
           | QValVar Loc
           deriving Show
@@ -153,4 +118,37 @@ type ContextLevel = String
 
 type SM = State SemState
 
-type Run = StateT RunEnv IO
+evalQOp :: QOp -> Value -> Value -> Value
+evalQOp QAnd = wrapBoolOp (&&)
+evalQOp QOr = wrapBoolOp (||)
+evalQOp QAdd = wrapNumOp (+) (+)
+evalQOp QSub = wrapNumOp (-) (-)
+evalQOp QMul = wrapNumOp (*) (*)
+evalQOp QDiv = wrapDoubleOp (/)
+evalQOp QDivInt = wrapIntOp div
+evalQOp QMod = wrapIntOp mod
+evalQOp QCmpEq = (ValBool.).(==)
+evalQOp QCmpNe = (ValBool.).(/=)
+evalQOp QCmpLt = wrapCmpOp (<) (<) (<)
+evalQOp QCmpGt = wrapCmpOp (>) (>) (>)
+evalQOp QCmpLe = wrapCmpOp (<=) (<=) (<=)
+evalQOp QCmpGe = wrapCmpOp (>=) (>=) (>=)
+
+wrapBoolOp :: (Bool -> Bool -> Bool) -> (Value -> Value -> Value)
+wrapBoolOp op v1 v2 = ValBool $ asBool v1 `op` asBool v2
+
+wrapNumOp :: (Int -> Int -> Int) -> (Double -> Double -> Double) -> (Value -> Value -> Value)
+wrapNumOp op _ (ValInt v1) (ValInt v2) = ValInt $ v1 `op` v2
+wrapNumOp _ op v1 v2 = wrapDoubleOp op v1 v2
+
+wrapIntOp :: (Int -> Int -> Int) -> (Value -> Value -> Value)
+wrapIntOp op v1 v2 = ValInt $ asInt v1 `op` asInt v2
+
+wrapDoubleOp :: (Double -> Double -> Double) -> (Value -> Value -> Value)
+wrapDoubleOp op v1 v2 = ValDouble $ asDouble v1 `op` asDouble v2
+
+wrapCmpOp :: (Int -> Int -> Bool) -> (String -> String -> Bool) -> (Char -> Char -> Bool) -> (Value -> Value -> Value)
+wrapCmpOp op _ _ (ValInt v1) (ValInt v2) = ValBool $ v1 `op` v2
+wrapCmpOp _ op _ (ValString v1) (ValString v2) = ValBool $ v1 `op` v2
+wrapCmpOp _ _ op (ValChar v1) (ValChar v2) = ValBool $ v1 `op` v2
+wrapCmpOp _ _ _ _ _ = error $ "wrapCmpOp: Incorrect or conflicting argument types"

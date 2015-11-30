@@ -12,6 +12,13 @@ import Printfoo(printTree)
 
 import Types
 
+newTmpLoc :: SM Loc
+newTmpLoc = do
+    env <- gets semEnv
+    let n = nextTmp env
+        env' = env{nextTmp=n+1}
+    modify (\ss -> ss{semEnv=env'})
+    return $ varLoc $ "tmp." ++ (show n)
 
 allocBlockName :: SM BlockName
 allocBlockName = do
@@ -288,21 +295,13 @@ pureExprSem mLoc e =
         pureExprSem' (AST.ExpTrue) = literalSem mLoc $ ValBool True
         pureExprSem' (AST.ExpFalse) = literalSem mLoc $ ValBool False
         pureExprSem' (AST.ExpInt i) = literalSem mLoc $ ValInt $ fromInteger i
+        pureExprSem' (AST.ExpDouble f) = literalSem mLoc $ ValDouble $ f
         pureExprSem' (AST.ExpStr s) = literalSem mLoc $ ValString s
         pureExprSem' locExp@(AST.ExpVoT _) = do
             loc <- expAsLoc locExp
             case mLoc of
                 Just destLoc -> return ([Quad2 destLoc $ QValVar loc], QValVar destLoc)
                 Nothing -> return ([], QValVar loc)
-        pureExprSem' (AST.ExpAnd lExp rExp) = pureBinOpSem mLoc (wrapBoolOp (&&)) lExp rExp
-        pureExprSem' (AST.ExpOr lExp rExp) = pureBinOpSem mLoc (wrapBoolOp (||)) lExp rExp
-        pureExprSem' (AST.ExpCmp lExp cmpOp rExp) = pureBinOpSem mLoc (cmpOpFun cmpOp) lExp rExp
-        pureExprSem' (AST.ExpAdd lExp rExp) = pureBinOpSem mLoc (wrapIntOp (+)) lExp rExp
-        pureExprSem' (AST.ExpSub lExp rExp) = pureBinOpSem mLoc (wrapIntOp (-)) lExp rExp
-        pureExprSem' (AST.ExpMul lExp rExp) = pureBinOpSem mLoc (wrapIntOp (*)) lExp rExp
---         pureExprSem' (AST.ExpDiv lExp rExp) = pureBinOpSem' True mLoc (/) lExp rExp
-        pureExprSem' (AST.ExpDivInt lExp rExp) = pureBinOpSem' True mLoc (wrapIntOp div) lExp rExp
-        pureExprSem' (AST.ExpMod lExp rExp) = pureBinOpSem mLoc (wrapIntOp mod) lExp rExp
         pureExprSem' call@(AST.ExpCall{}) = do
             destLoc <- case mLoc of
                 Just loc -> return loc
@@ -310,19 +309,21 @@ pureExprSem mLoc e =
             quadCode <- callSem call (Just (Just destLoc, False))
             return (quadCode, QValVar destLoc)
         pureExprSem' expr = do
-            reportError $ "pureExprSem: Expression not yet implemented: " ++ (printTree expr)
-            return ([], QValConst $ error $ "invalid")
+            case unpackBinOpExpr expr of
+                Just (lExp, qOp, rExp) -> do
+                    pureBinOpSem mLoc lExp qOp rExp
+                Nothing -> do
+                    reportError $ "pureExprSem: Expression not yet implemented: " ++ printTree expr
+                    return ([], QValConst $ error $ "invalid")
 
         literalSem Nothing val = return ([], QValConst val)
         literalSem (Just destLoc) val = return ([Quad2 destLoc $ QValConst val], QValVar destLoc)
 
-pureBinOpSem :: Maybe Loc -> BinOpF -> AST.Exp -> AST.Exp -> SM (QuadCode, QVal)
-pureBinOpSem = pureBinOpSem' False
-
-pureBinOpSem' :: Bool -> Maybe Loc -> BinOpF -> AST.Exp -> AST.Exp -> SM (QuadCode, QVal)
-pureBinOpSem' isDivision mLoc op lExp rExp = do
+pureBinOpSem :: Maybe Loc -> AST.Exp -> QOp -> AST.Exp -> SM (QuadCode, QVal)
+pureBinOpSem mLoc lExp op rExp = do
     (lCode, lQVal) <- pureExprSem Nothing lExp
     (rCode, rQVal) <- pureExprSem Nothing rExp
+    let isDivision = op == QDiv || op == QDivInt
     case rQVal of
         QValConst rConst -> do
             when (isDivision && isZero rConst) $ do
@@ -330,7 +331,7 @@ pureBinOpSem' isDivision mLoc op lExp rExp = do
         _ -> return ()
     case (lCode, lQVal, rCode, rQVal) of
         ([], QValConst lConst, [], QValConst rConst) -> do
-            return ([], QValConst $ lConst `op` rConst)
+            return ([], QValConst $ evalQOp op lConst rConst)
         _ -> do
             destLoc <- case mLoc of
                 Just loc -> return loc
@@ -345,26 +346,18 @@ nonPureExprSem e =
         nonPureExprSem' (AST.ExpArrow _) = do
             reportError "Unexpected ->"
             return []
-        nonPureExprSem' (AST.ExpAnd lExp rExp) = nonPureBinOpSem (wrapBoolOp (&&)) lExp rExp
-        nonPureExprSem' (AST.ExpOr lExp rExp) = nonPureBinOpSem (wrapBoolOp (||)) lExp rExp
-        nonPureExprSem' (AST.ExpCmp lExp cmpOp rExp) = nonPureBinOpSem (cmpOpFun cmpOp) lExp rExp
-        nonPureExprSem' (AST.ExpAdd lExp rExp) = nonPureBinOpSem (wrapIntOp (+)) lExp rExp
-        nonPureExprSem' (AST.ExpSub lExp rExp) = nonPureBinOpSem (wrapIntOp (-)) lExp rExp
-        nonPureExprSem' (AST.ExpMul lExp rExp) = nonPureBinOpSem (wrapIntOp (*)) lExp rExp
---         nonPureExprSem' (AST.ExpDiv lExp rExp) = nonPureBinOpSem' True (/) lExp rExp
-        nonPureExprSem' (AST.ExpDivInt lExp rExp) = nonPureBinOpSem' True (wrapIntOp div) lExp rExp
-        nonPureExprSem' (AST.ExpMod lExp rExp) = nonPureBinOpSem (wrapIntOp mod) lExp rExp
         nonPureExprSem' call@(AST.ExpCall{}) = do
             callSem call Nothing
         nonPureExprSem' expr = do
-            reportError $ "nonPureExprSem: Expression not yet implemented: " ++ (printTree expr)
-            return []
+            case unpackBinOpExpr expr of
+                Just (lExp, qOp, rExp) -> do
+                    nonPureBinOpSem lExp qOp rExp
+                Nothing -> do
+                    reportError $ "nonPureExprSem: Expression not yet implemented: " ++ (printTree expr)
+                    return []
 
-nonPureBinOpSem :: BinOpF -> AST.Exp -> AST.Exp -> SM QuadCode
-nonPureBinOpSem = nonPureBinOpSem' False
-
-nonPureBinOpSem' :: Bool -> BinOpF -> AST.Exp -> AST.Exp -> SM QuadCode
-nonPureBinOpSem' isDivision op lExp rExp = do
+nonPureBinOpSem :: AST.Exp -> QOp -> AST.Exp -> SM QuadCode
+nonPureBinOpSem lExp op rExp = do
     mTriple <- case (lExp, rExp) of
             (AST.ExpArrow _, AST.ExpArrow _) -> do
                 reportError $ "Multiple arrows"
@@ -377,8 +370,27 @@ nonPureBinOpSem' isDivision op lExp rExp = do
     case mTriple of
         Just (locExp, lExp', rExp') -> do
             destLoc <- expAsLoc locExp
-            liftM fst $ pureBinOpSem' isDivision (Just destLoc) op lExp' rExp'
+            liftM fst $ pureBinOpSem (Just destLoc) lExp' op rExp'
         Nothing -> return []  -- error already reported above
+
+unpackBinOpExpr :: AST.Exp -> Maybe (AST.Exp, QOp, AST.Exp)
+unpackBinOpExpr (AST.ExpAnd lExp rExp) = Just (lExp, QAnd, rExp)
+unpackBinOpExpr (AST.ExpOr lExp rExp) = Just (lExp, QOr, rExp)
+unpackBinOpExpr (AST.ExpCmp lExp cmpOp rExp) = Just (lExp, qOp, rExp) where
+    qOp = case cmpOp of
+        AST.EqOp -> QCmpEq
+        AST.NeOp -> QCmpNe
+        AST.LtOp -> QCmpLt
+        AST.GtOp -> QCmpGt
+        AST.LeOp -> QCmpLe
+        AST.GeOp -> QCmpGe
+unpackBinOpExpr (AST.ExpAdd lExp rExp) = Just (lExp, QAdd, rExp)
+unpackBinOpExpr (AST.ExpSub lExp rExp) = Just (lExp, QSub, rExp)
+unpackBinOpExpr (AST.ExpMul lExp rExp) = Just (lExp, QMul, rExp)
+unpackBinOpExpr (AST.ExpDiv lExp rExp) = Just (lExp, QDiv, rExp)
+unpackBinOpExpr (AST.ExpDivInt lExp rExp) = Just (lExp, QDivInt, rExp)
+unpackBinOpExpr (AST.ExpMod lExp rExp) = Just (lExp, QMod, rExp)
+unpackBinOpExpr _ = Nothing
 
 callSem :: AST.Exp -> Maybe (Maybe Loc, Bool) -> SM QuadCode
 callSem (AST.ExpCall (AST.ExpVoT [AST.Name (_pos, fName)]) argExps) outsInfo = do
@@ -434,24 +446,3 @@ exprCtx = printTree
 expAsLoc :: AST.Exp -> SM Loc
 expAsLoc (AST.ExpVoT [AST.Name (_, varName)]) = return $ Loc varName []
 expAsLoc destExp = error $ "Not lvalue or not yet handled as lvalue: " ++ (printTree destExp)
-
-
-wrapBoolOp :: (Bool -> Bool -> Bool) -> (Value -> Value -> Value)
-wrapBoolOp op v1 v2 = ValBool $ asBool v1 `op` asBool v2
-
-wrapIntOp :: (Int -> Int -> Int) -> (Value -> Value -> Value)
-wrapIntOp op v1 v2 = ValInt $ asInt v1 `op` asInt v2
-
-wrapCmpOp :: (Int -> Int -> Bool) -> (String -> String -> Bool) -> (Char -> Char -> Bool) -> (Value -> Value -> Value)
-wrapCmpOp op _ _ (ValInt v1) (ValInt v2) = ValBool $ v1 `op` v2
-wrapCmpOp _ op _ (ValString v1) (ValString v2) = ValBool $ v1 `op` v2
-wrapCmpOp _ _ op (ValChar v1) (ValChar v2) = ValBool $ v1 `op` v2
-wrapCmpOp _ _ _ _ _ = error $ "wrapCmpOp: Incorrect or conflicting argument types"
-
-cmpOpFun :: AST.CmpOp -> (Value -> Value -> Value)
-cmpOpFun AST.EqOp = (ValBool.).(==)
-cmpOpFun AST.NeOp = (ValBool.).(/=)
-cmpOpFun AST.LtOp = wrapCmpOp (<) (<) (<)
-cmpOpFun AST.GtOp = wrapCmpOp (>) (>) (>)
-cmpOpFun AST.LeOp = wrapCmpOp (<=) (<=) (<=)
-cmpOpFun AST.GeOp = wrapCmpOp (>=) (>=) (>=)

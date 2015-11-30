@@ -85,22 +85,23 @@ EqOp. CmpOp ::= "==" ;
 NeOp. CmpOp ::= "/=" ;
 LtOp. CmpOp ::= "<" ;
 GtOp. CmpOp ::= ">" ;
-LeOp. CmpOp ::= "=<" ;
+LeOp. CmpOp ::= "<=" ;
 GeOp. CmpOp ::= ">=" ;
 
 ExpAdd.   Exp8 ::= Exp8 "+" Exp42 ;
 ExpSub.   Exp8 ::= Exp8 "-" Exp42 ;
+
+ExpRange. Exp36 ::= Exp42 ".." Exp42 ;
 
 ExpMul.    Exp42 ::= Exp42 "*" Exp50 ;
 ExpDiv.    Exp42 ::= Exp42 "/" Exp50 ;
 ExpDivInt. Exp42 ::= Exp42 "//" Exp50 ;
 ExpMod.    Exp42 ::= Exp42 "%" Exp50 ;
 
-ExpRange. Exp50 ::= Exp55 ".." Exp55 ;
-
 ExpCall. Exp55 ::= Exp60 "(" [Exp] ")" ;
 
 ExpInt.   Exp60 ::= Integer ;
+ExpDouble.Exp60 ::= Double ;
 ExpStr.   Exp60 ::= String ;
 ExpChar.  Exp60 ::= Char ;
 ExpTrue.  Exp60 ::= "True" ;
